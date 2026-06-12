@@ -3,6 +3,7 @@
 
 mod app;
 mod dashboard;
+mod draft;
 mod state;
 mod team_builder;
 mod ui;

@@ -1,0 +1,180 @@
+//! Draft screen: the lottery-seeded pick board on the left, the available
+//! prospect board on the right. The user drafts on their pick; "Sim to my
+//! pick" and "Sim entire draft" handle the rest.
+
+use crate::state::{AppState, Tab};
+use crate::ui::ThemeToggle;
+use leptos::prelude::*;
+
+#[component]
+pub fn DraftScreen() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let league = state.league;
+
+    let season = move || league.with(|l| l.season);
+    let complete = move || league.with(|l| l.draft_complete());
+    let user_on = move || league.with(|l| l.is_user_on_clock());
+
+    // Whose pick is it.
+    let on_clock = move || {
+        league.with(|l| {
+            l.draft.as_ref().and_then(|d| d.current()).map(|p| {
+                let team = l.teams.iter().find(|t| t.id == p.team_id).map(|t| t.full_name()).unwrap_or_default();
+                (p.overall, team, Some(p.team_id) == l.user_team_id)
+            })
+        })
+    };
+
+    let status = move || match on_clock() {
+        _ if complete() => "The draft is complete.".to_string(),
+        Some((ov, _team, true)) => format!("You're on the clock — pick #{ov}"),
+        Some((ov, team, false)) => format!("Pick #{ov}: {team} is on the clock"),
+        None => String::new(),
+    };
+
+    // Actions.
+    let sim_to_me = move |_| state.update_league(|l| l.draft_sim_to_user());
+    let sim_all = move |_| state.update_league(|l| l.draft_sim_all());
+    let start_season = {
+        let tab = state.tab;
+        move |_| {
+            state.update_league(|l| l.start_new_season());
+            tab.set(Tab::Standings);
+        }
+    };
+
+    view! {
+        <div class="builder">
+            <header class="builder-top">
+                <div>
+                    <h1 class="brand">"Rookie " <span class="brand-accent">"Draft"</span></h1>
+                    <p class="subtitle">{move || format!("Following the {} season", season())}" \u{2022} "{status}</p>
+                </div>
+                <div class="draft-actions">
+                    <Show
+                        when=complete
+                        fallback=move || view! {
+                            <Show when=move || !user_on()>
+                                <button class="btn" on:click=sim_to_me>"Sim to My Pick"</button>
+                            </Show>
+                            <button class="btn" on:click=sim_all>"Sim Entire Draft"</button>
+                        }
+                    >
+                        <button class="btn btn-primary" on:click=start_season>
+                            {move || format!("Start Season {} \u{2192}", season() + 1)}
+                        </button>
+                    </Show>
+                    <ThemeToggle/>
+                </div>
+            </header>
+
+            <div class="draft-cols">
+                <PickBoard/>
+                <ProspectBoard/>
+            </div>
+        </div>
+    }
+}
+
+#[component]
+fn PickBoard() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let league = state.league;
+    let picks = move || {
+        league.with(|l| {
+            let Some(d) = &l.draft else { return Vec::new() };
+            d.picks
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let team = l.teams.iter().find(|t| t.id == p.team_id).map(|t| t.abbrev.clone()).unwrap_or_default();
+                    let is_user = Some(p.team_id) == l.user_team_id;
+                    let name = p.player_id.and_then(|pid| l.players.iter().find(|pl| pl.id == pid)).map(|pl| format!("{} ({})", pl.name, pl.position.abbrev()));
+                    (p.overall, p.round, team, name, i == d.on_clock, is_user)
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+
+    view! {
+        <div class="card draft-board">
+            <h3 class="card-title">"Draft Order"</h3>
+            <div class="pick-list">
+                {move || picks().into_iter().map(|(ov, round, team, name, current, is_user)| {
+                    let cls = if current { "pick-row current" } else if is_user { "pick-row user" } else { "pick-row" };
+                    let label = name.unwrap_or_else(|| if current { "On the clock".into() } else { "\u{2014}".into() });
+                    view! {
+                        <div class=cls>
+                            <span class="pick-no">{ov}</span>
+                            <span class="pick-team">{team}</span>
+                            <span class="pick-name">{label}</span>
+                            <span class="pick-round">{format!("R{round}")}</span>
+                        </div>
+                    }
+                }).collect_view()}
+            </div>
+        </div>
+    }
+}
+
+#[component]
+fn ProspectBoard() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let league = state.league;
+    let user_on = move || league.with(|l| l.is_user_on_clock());
+
+    let prospects = move || {
+        league.with(|l| {
+            let Some(d) = &l.draft else { return Vec::new() };
+            let mut v: Vec<_> = d
+                .prospects
+                .iter()
+                .filter_map(|id| l.players.iter().find(|p| p.id == *id))
+                .map(|p| {
+                    let r = &p.ratings;
+                    (p.id, p.name.clone(), p.position.abbrev(), p.age, p.overall(),
+                     r.three, r.layup, r.dunk, r.passing, r.ball_handling, r.rebounding, r.defense, r.athleticism)
+                })
+                .collect();
+            v.sort_by(|a, b| b.4.cmp(&a.4));
+            v
+        })
+    };
+
+    let pick = move |pid: u32| state.update_league(move |l| l.draft_user_pick(pid));
+
+    view! {
+        <div class="card draft-prospects">
+            <h3 class="card-title">
+                "Available Prospects"
+                {move || if user_on() { view! { <span class="pick-hint">" — click a player to draft"</span> }.into_any() } else { view! { <span></span> }.into_any() }}
+            </h3>
+            <table class="tbl">
+                <thead><tr>
+                    <th class="left">"Prospect"</th><th>"Pos"</th><th>"Age"</th><th>"OVR"</th>
+                    <th>"3pt"</th><th>"Lay"</th><th>"Dnk"</th><th>"Pas"</th><th>"Hdl"</th>
+                    <th>"Reb"</th><th>"Def"</th><th>"Ath"</th>
+                </tr></thead>
+                <tbody>
+                    {move || {
+                        let clickable = user_on();
+                        prospects().into_iter().map(move |(id, name, pos, age, ovr, three, lay, dnk, pas, hdl, reb, def, ath)| {
+                            let cls = if clickable { "row pickable" } else { "row" };
+                            view! {
+                                <tr class=cls on:click=move |_| if clickable { pick(id) }>
+                                    <td class="left">{name}</td>
+                                    <td>{pos}</td>
+                                    <td>{age}</td>
+                                    <td><span class="ovr">{ovr}</span></td>
+                                    <td>{three}</td><td>{lay}</td><td>{dnk}</td>
+                                    <td>{pas}</td><td>{hdl}</td>
+                                    <td>{reb}</td><td>{def}</td><td>{ath}</td>
+                                </tr>
+                            }
+                        }).collect_view()
+                    }}
+                </tbody>
+            </table>
+        </div>
+    }
+}

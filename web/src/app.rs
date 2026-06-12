@@ -2,6 +2,7 @@
 //! team builder and the main dashboard.
 
 use crate::dashboard::Dashboard;
+use crate::draft::DraftScreen;
 use crate::state::{load_saved_league, load_theme, save_theme, AppState, Tab};
 use crate::team_builder::TeamBuilder;
 use engine::{League, Phase};
@@ -46,14 +47,15 @@ pub fn App() -> impl IntoView {
         }
     };
 
+    let phase = move || league.with(|l| l.phase);
+
     view! {
         <div class=root_class style=move || format!("--accent:{}", accent())>
-            <Show
-                when=move || league.with(|l| l.phase == Phase::TeamSelect)
-                fallback=|| view! { <Dashboard/> }
-            >
-                <TeamBuilder/>
-            </Show>
+            {move || match phase() {
+                Phase::TeamSelect => view! { <TeamBuilder/> }.into_any(),
+                Phase::Draft => view! { <DraftScreen/> }.into_any(),
+                _ => view! { <Dashboard/> }.into_any(),
+            }}
         </div>
     }
 }

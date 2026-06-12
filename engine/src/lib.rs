@@ -4,6 +4,7 @@
 //! web layer can stay a thin presentation shell. The central type is
 //! [`League`], which is fully serializable for save/load.
 
+pub mod draft;
 pub mod league;
 pub mod names;
 pub mod player;
@@ -15,6 +16,7 @@ pub mod team;
 pub mod teams_data;
 pub mod types;
 
+pub use draft::{Draft, DraftPick};
 pub use league::{League, Phase, PlayoffOutcome, SeasonHistory, SeasonRecap};
 pub use player::{Player, Ratings, SeasonStats};
 pub use playoffs::{Playoffs, Series, ROUND_NAMES};
@@ -64,6 +66,53 @@ mod integration_tests {
         league.finish_season();
         assert_eq!(league.phase, Phase::Offseason);
         assert_eq!(league.history.len(), 1);
+    }
+
+    #[test]
+    fn draft_runs_and_fills_every_pick() {
+        let mut league = League::new(99);
+        league.select_team(3);
+        league.sim_to_end_of_season();
+        league.start_playoffs();
+        league.finish_season();
+
+        let players_before = league.players.len();
+        league.enter_draft();
+        assert_eq!(league.phase, Phase::Draft);
+        assert_eq!(league.players.len(), players_before + 70);
+
+        // Worst team should hold a top-3 lottery slot most years; at minimum the
+        // order must contain all 32 teams in round 1.
+        let r1_teams: std::collections::HashSet<_> = league
+            .draft
+            .as_ref()
+            .unwrap()
+            .picks
+            .iter()
+            .filter(|p| p.round == 1)
+            .map(|p| p.team_id)
+            .collect();
+        assert_eq!(r1_teams.len(), 32);
+
+        // Sim the whole draft; every pick should be filled with a unique player.
+        league.draft_sim_all();
+        assert!(league.draft_complete());
+        let d = league.draft.as_ref().unwrap();
+        assert_eq!(d.picks.len(), 64);
+        let mut drafted = std::collections::HashSet::new();
+        for p in &d.picks {
+            let pid = p.player_id.expect("pick made");
+            assert!(drafted.insert(pid), "player drafted twice");
+            // Drafted player is now on that team's roster.
+            let team = league.teams.iter().find(|t| t.id == p.team_id).unwrap();
+            assert!(team.roster.contains(&pid));
+        }
+
+        // New season clears the draft and resets records.
+        league.start_new_season();
+        assert!(league.draft.is_none());
+        assert_eq!(league.phase, Phase::RegularSeason);
+        assert!(league.teams.iter().all(|t| t.games_played() == 0));
     }
 
     #[test]

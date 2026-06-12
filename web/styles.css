@@ -164,6 +164,23 @@ body {
 .status-record { color: var(--muted); font-size: .9rem; }
 .topbar-actions { display: flex; gap: .6rem; flex-wrap: wrap; }
 
+/* Season W/L results strip */
+.results-bar {
+  display: flex; gap: 3px; align-items: center;
+  padding: .6rem 1.5rem; border-bottom: 1px solid var(--border);
+  overflow-x: auto; white-space: nowrap;
+}
+.result-box {
+  flex: 0 0 auto;
+  width: 20px; height: 22px; border-radius: 4px;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: .68rem; font-weight: 800; color: #fff; cursor: default;
+  transition: transform .08s ease;
+}
+.result-box:hover { transform: scale(1.25); }
+.result-box.w { background: #2faa55; }
+.result-box.l { background: #e0413a; }
+
 .panel { padding: 1.5rem; }
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
 @media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } .dash { grid-template-columns: 1fr; } }
@@ -208,6 +225,28 @@ body {
 .seed-line.won { font-weight: 800; color: var(--text); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .seed-line .wins { color: var(--muted); }
 .seed-line.won .wins { color: var(--accent); }
+
+/* Draft */
+.draft-actions { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.draft-cols { display: grid; grid-template-columns: 320px 1fr; gap: 1.25rem; margin-top: 1.75rem; }
+@media (max-width: 900px) { .draft-cols { grid-template-columns: 1fr; } }
+.draft-board .pick-list { max-height: 70vh; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.pick-row {
+  display: grid; grid-template-columns: 32px 44px 1fr 28px; align-items: center; gap: .4rem;
+  padding: .4rem .5rem; border-radius: 8px; font-size: .85rem;
+}
+.pick-row:hover { background: var(--row-hover); }
+.pick-row.current { background: color-mix(in srgb, var(--accent) 22%, transparent); font-weight: 700; }
+.pick-row.user { box-shadow: inset 3px 0 0 var(--accent); }
+.pick-no { color: var(--muted); font-weight: 800; text-align: right; }
+.pick-team { font-weight: 700; }
+.pick-name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick-round { color: var(--muted); font-size: .7rem; }
+.draft-prospects .tbl { font-size: .82rem; }
+.draft-prospects .pick-list { }
+.pick-hint { color: var(--accent); font-weight: 600; font-size: .8rem; }
+.row.pickable { cursor: pointer; }
+.row.pickable:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); }
 
 /* Recap overlay */
 .overlay {

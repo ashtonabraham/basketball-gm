@@ -12,6 +12,7 @@ pub enum Tab {
     Standings,
     Schedule,
     Roster,
+    Stats,
     Playoffs,
     History,
 }

@@ -16,11 +16,13 @@ pub fn Dashboard() -> impl IntoView {
             <Sidebar/>
             <main class="dash-main">
                 <TopBar/>
+                <ResultsBar/>
                 <div class="panel">
                     {move || match tab.get() {
                         Tab::Standings => view! { <StandingsPanel/> }.into_any(),
                         Tab::Schedule => view! { <SchedulePanel/> }.into_any(),
                         Tab::Roster => view! { <RosterPanel/> }.into_any(),
+                        Tab::Stats => view! { <StatsPanel/> }.into_any(),
                         Tab::Playoffs => view! { <PlayoffsPanel/> }.into_any(),
                         Tab::History => view! { <HistoryPanel/> }.into_any(),
                     }}
@@ -88,6 +90,7 @@ fn Sidebar() -> impl IntoView {
                 {nav_btn(Tab::Standings, "Standings")}
                 {nav_btn(Tab::Schedule, "Schedule")}
                 {nav_btn(Tab::Roster, "Roster")}
+                {nav_btn(Tab::Stats, "Stats")}
                 {nav_btn(Tab::Playoffs, "Playoffs")}
                 {nav_btn(Tab::History, "History")}
             </nav>
@@ -122,6 +125,7 @@ fn TopBar() -> impl IntoView {
             Phase::RegularSeason => "Regular Season Complete".to_string(),
             Phase::Playoffs => "Playoffs".to_string(),
             Phase::Offseason => "Offseason".to_string(),
+            Phase::Draft => "Draft".to_string(),
         }
     };
 
@@ -281,11 +285,12 @@ fn RosterPanel() -> impl IntoView {
             let Some(team) = team else { return Vec::new() };
             let mut ps: Vec<_> = team.roster.iter()
                 .filter_map(|pid| l.players.iter().find(|p| p.id == *pid))
-                .map(|p| (
-                    p.name.clone(), p.position.abbrev(), p.age, p.overall(),
-                    p.ratings.inside, p.ratings.outside, p.ratings.playmaking,
-                    p.ratings.rebounding, p.ratings.defense, p.ratings.athleticism,
-                ))
+                .map(|p| {
+                    let r = &p.ratings;
+                    (p.name.clone(), p.position.abbrev(), p.age, p.overall(),
+                     r.layup, r.dunk, r.three, r.passing, r.ball_handling,
+                     r.rebounding, r.defense, r.athleticism)
+                })
                 .collect();
             ps.sort_by(|a, b| b.3.cmp(&a.3));
             ps
@@ -298,17 +303,20 @@ fn RosterPanel() -> impl IntoView {
             <table class="tbl">
                 <thead><tr>
                     <th class="left">"Player"</th><th>"Pos"</th><th>"Age"</th><th>"OVR"</th>
-                    <th>"Ins"</th><th>"Out"</th><th>"Pmk"</th><th>"Reb"</th><th>"Def"</th><th>"Ath"</th>
+                    <th title="Layup">"Lay"</th><th title="Dunk">"Dnk"</th><th title="Three-point">"3pt"</th>
+                    <th title="Passing">"Pas"</th><th title="Ball handling">"Hdl"</th>
+                    <th title="Rebounding">"Reb"</th><th title="Defense">"Def"</th><th title="Athleticism">"Ath"</th>
                 </tr></thead>
                 <tbody>
-                    {move || players().into_iter().map(|(name, pos, age, ovr, ins, out, pmk, reb, def, ath)| {
+                    {move || players().into_iter().map(|(name, pos, age, ovr, lay, dnk, three, pas, hdl, reb, def, ath)| {
                         view! {
                             <tr class="row">
                                 <td class="left">{name}</td>
                                 <td>{pos}</td>
                                 <td>{age}</td>
                                 <td><span class="ovr">{ovr}</span></td>
-                                <td>{ins}</td><td>{out}</td><td>{pmk}</td>
+                                <td>{lay}</td><td>{dnk}</td><td>{three}</td>
+                                <td>{pas}</td><td>{hdl}</td>
                                 <td>{reb}</td><td>{def}</td><td>{ath}</td>
                             </tr>
                         }
@@ -413,6 +421,141 @@ fn HistoryPanel() -> impl IntoView {
     }
 }
 
+#[component]
+fn ResultsBar() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let games = move || {
+        state.league.with(|l| {
+            let Some(id) = l.user_team_id else { return Vec::new() };
+            let mut v: Vec<_> = l
+                .schedule
+                .iter()
+                .filter(|g| (g.home == id || g.away == id) && g.is_played())
+                .collect();
+            v.sort_by_key(|g| g.day);
+            v.into_iter()
+                .filter_map(|g| {
+                    let home = g.home == id;
+                    let opp_id = if home { g.away } else { g.home };
+                    let opp = l.teams.iter().find(|t| t.id == opp_id).map(|t| t.abbrev.clone())?;
+                    let r = g.result?;
+                    let (us, them) = if home { (r.home_score, r.away_score) } else { (r.away_score, r.home_score) };
+                    let win = us > them;
+                    let tip = format!("{} {}\u{2013}{} {} {}", if win { "W" } else { "L" }, us, them, if home { "vs" } else { "@" }, opp);
+                    Some((win, tip))
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+
+    view! {
+        <Show when=move || !games().is_empty()>
+            <div class="results-bar">
+                {move || games().into_iter().map(|(win, tip)| {
+                    view! {
+                        <span class=if win { "result-box w" } else { "result-box l" } title=tip>
+                            {if win { "W" } else { "L" }}
+                        </span>
+                    }
+                }).collect_view()}
+            </div>
+        </Show>
+    }
+}
+
+#[component]
+fn StatsPanel() -> impl IntoView {
+    let state = expect_context::<AppState>();
+
+    // User team per-game stats.
+    let team_rows = move || {
+        state.league.with(|l| {
+            let Some(id) = l.user_team_id else { return Vec::new() };
+            let Some(team) = l.teams.iter().find(|t| t.id == id) else { return Vec::new() };
+            let mut rows: Vec<_> = team
+                .roster
+                .iter()
+                .filter_map(|pid| l.players.iter().find(|p| p.id == *pid))
+                .map(|p| {
+                    let s = &l.season_stats[p.id as usize];
+                    (p.name.clone(), p.position.abbrev(), s.gp, s.mpg(), s.ppg(), s.rpg(), s.apg(), s.fg_pct(), s.tp_pct())
+                })
+                .collect();
+            rows.sort_by(|a, b| b.4.partial_cmp(&a.4).unwrap());
+            rows
+        })
+    };
+
+    // League scoring leaders.
+    let leaders = move || {
+        state.league.with(|l| {
+            let mut rows: Vec<_> = l
+                .players
+                .iter()
+                .filter(|p| l.season_stats[p.id as usize].gp > 0)
+                .map(|p| {
+                    let s = &l.season_stats[p.id as usize];
+                    let team = p.team.and_then(|tid| l.teams.iter().find(|t| t.id == tid)).map(|t| t.abbrev.clone()).unwrap_or_default();
+                    (p.name.clone(), team, s.ppg())
+                })
+                .collect();
+            rows.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
+            rows.truncate(10);
+            rows
+        })
+    };
+
+    let any_games = move || state.league.with(|l| l.season_stats.iter().any(|s| s.gp > 0));
+
+    view! {
+        <Show
+            when=any_games
+            fallback=|| view! { <div class="card"><p class="empty">"Play some games to see stats."</p></div> }
+        >
+            <div class="two-col">
+                <div class="card">
+                    <h3 class="card-title">"Your Team \u{2014} Per Game"</h3>
+                    <table class="tbl">
+                        <thead><tr>
+                            <th class="left">"Player"</th><th>"Pos"</th><th>"GP"</th><th>"MPG"</th>
+                            <th>"PPG"</th><th>"RPG"</th><th>"APG"</th><th>"FG%"</th><th>"3P%"</th>
+                        </tr></thead>
+                        <tbody>
+                            {move || team_rows().into_iter().map(|(name, pos, gp, mpg, ppg, rpg, apg, fg, tp)| view! {
+                                <tr class="row">
+                                    <td class="left">{name}</td><td>{pos}</td><td>{gp}</td>
+                                    <td>{format!("{:.1}", mpg)}</td>
+                                    <td><b>{format!("{:.1}", ppg)}</b></td>
+                                    <td>{format!("{:.1}", rpg)}</td>
+                                    <td>{format!("{:.1}", apg)}</td>
+                                    <td>{fmt_pct(fg)}</td>
+                                    <td>{fmt_pct(tp)}</td>
+                                </tr>
+                            }).collect_view()}
+                        </tbody>
+                    </table>
+                </div>
+                <div class="card">
+                    <h3 class="card-title">"League Scoring Leaders"</h3>
+                    <table class="tbl">
+                        <thead><tr><th>"#"</th><th class="left">"Player"</th><th>"Team"</th><th>"PPG"</th></tr></thead>
+                        <tbody>
+                            {move || leaders().into_iter().enumerate().map(|(i, (name, team, ppg))| view! {
+                                <tr class="row">
+                                    <td>{i + 1}</td>
+                                    <td class="left">{name}</td>
+                                    <td>{team}</td>
+                                    <td><b>{format!("{:.1}", ppg)}</b></td>
+                                </tr>
+                            }).collect_view()}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </Show>
+    }
+}
+
 fn describe_outcome(o: PlayoffOutcome) -> String {
     match o {
         PlayoffOutcome::MissedPlayoffs => "Missed playoffs".to_string(),
@@ -426,13 +569,7 @@ fn RecapOverlay() -> impl IntoView {
     let state = expect_context::<AppState>();
     let recap = move || state.league.with(|l| l.season_recap());
 
-    let next_season = {
-        let tab = state.tab;
-        move |_| {
-            state.update_league(|l| l.start_new_season());
-            tab.set(Tab::Standings);
-        }
-    };
+    let to_draft = move |_| state.update_league(|l| l.enter_draft());
 
     view! {
         <div class="overlay">
@@ -450,7 +587,7 @@ fn RecapOverlay() -> impl IntoView {
                         </div>
                         <div class="recap-line">"League Champion: "<b>{r.champion_name}</b></div>
                         <div class="recap-line">"Team MVP: "<b>{r.best_player}</b>" ("{r.best_player_ovr}" OVR)"</div>
-                        <button class="btn btn-primary big" on:click=next_season>"Start Season "{r.season + 1}" \u{2192}"</button>
+                        <button class="btn btn-primary big" on:click=to_draft>"Continue to Draft \u{2192}"</button>
                     }
                 })}
             </div>

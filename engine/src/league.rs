@@ -3,6 +3,7 @@
 //! This is the single object the UI holds. It is fully `serde`-serializable, so
 //! the web layer can save/load it to the browser's localStorage as JSON.
 
+use crate::draft::{Draft, DraftPick};
 use crate::names::{FIRST_NAMES, LAST_NAMES};
 use crate::player::{Player, Ratings, SeasonStats};
 use crate::playoffs::{simulate_playoffs, Playoffs};
@@ -75,6 +76,8 @@ pub enum Phase {
     Playoffs,
     /// Season over; recap is available.
     Offseason,
+    /// The annual draft is running.
+    Draft,
 }
 
 /// How a team's season ended, for the recap.
@@ -122,6 +125,8 @@ pub struct League {
     pub history: Vec<SeasonHistory>,
     /// Accumulated regular-season stats, indexed by player id.
     pub season_stats: Vec<SeasonStats>,
+    /// The draft, while one is running.
+    pub draft: Option<Draft>,
     seed: u64,
     next_player_id: PlayerId,
 }
@@ -140,6 +145,7 @@ impl League {
             playoffs: None,
             history: Vec::new(),
             season_stats: Vec::new(),
+            draft: None,
             seed,
             next_player_id: 0,
         };
@@ -456,11 +462,195 @@ impl League {
         self.phase = Phase::Offseason;
     }
 
-    /// Roll into the next season: age players, reset records, rebuild the
-    /// schedule, and tip off a new regular season. Rosters and customizations
-    /// are kept. (Draft/free agency come later.)
+    // ---- Draft ----
+
+    /// Generate a prospect class and the lottery-seeded 2-round draft order,
+    /// then move into the draft phase. Call after `finish_season`.
+    pub fn enter_draft(&mut self) {
+        let mut rng = StdRng::seed_from_u64(self.seed ^ 0xD4AF7_u64 ^ (self.season as u64));
+
+        // --- Generate ~70 prospects (young, with a draft-class talent curve). ---
+        let mut prospects: Vec<PlayerId> = Vec::new();
+        let class_size = 70;
+        for i in 0..class_size {
+            // Earlier prospects skew more talented, with randomness so the board
+            // isn't perfectly ordered.
+            let curve = 60.0 - (i as f64 / class_size as f64) * 22.0;
+            let mut talent = curve + rng.gen_range(-9.0..9.0);
+            if rng.gen::<f64>() < 0.08 {
+                talent += 8.0; // occasional stud
+            }
+            let pos = Position::ALL[rng.gen_range(0..5)];
+            let id = self.next_player_id;
+            self.next_player_id += 1;
+            let first = FIRST_NAMES[rng.gen_range(0..FIRST_NAMES.len())];
+            let last = LAST_NAMES[rng.gen_range(0..LAST_NAMES.len())];
+            self.players.push(Player {
+                id,
+                name: format!("{first} {last}"),
+                age: rng.gen_range(19..=22),
+                position: pos,
+                ratings: gen_ratings(pos, talent, &mut rng),
+                team: None,
+            });
+            prospects.push(id);
+        }
+        // Keep the season-stats table sized to the player list.
+        self.season_stats.resize(self.players.len(), SeasonStats::default());
+
+        // --- Draft order ---
+        let order = self.draft_order(&mut rng);
+        let mut picks = Vec::with_capacity(64);
+        for round in 1..=2u8 {
+            for (i, &team_id) in order.iter().enumerate() {
+                picks.push(DraftPick {
+                    round,
+                    overall: ((round as usize - 1) * 32 + i + 1) as u8,
+                    team_id,
+                    player_id: None,
+                });
+            }
+        }
+
+        self.draft = Some(Draft { picks, prospects, on_clock: 0 });
+        self.phase = Phase::Draft;
+    }
+
+    /// Round-1 order: a weighted lottery among the 16 non-playoff teams (worst
+    /// record = best odds), followed by the 16 playoff teams worst-record-first.
+    fn draft_order(&self, rng: &mut impl Rng) -> Vec<TeamId> {
+        let playoff_teams: std::collections::HashSet<TeamId> =
+            playoff_seeds(&self.teams, Conference::East)
+                .into_iter()
+                .chain(playoff_seeds(&self.teams, Conference::West))
+                .collect();
+
+        // All teams worst-record-first.
+        let mut by_record: Vec<&Team> = self.teams.iter().collect();
+        by_record.sort_by(|a, b| {
+            a.win_pct().partial_cmp(&b.win_pct()).unwrap().then(a.wins.cmp(&b.wins))
+        });
+
+        // Lottery pool = non-playoff teams; weight worst teams highest.
+        let mut pool: Vec<TeamId> = by_record
+            .iter()
+            .filter(|t| !playoff_teams.contains(&t.id))
+            .map(|t| t.id)
+            .collect();
+        let mut weights: Vec<f64> = (0..pool.len()).map(|i| (pool.len() - i) as f64).collect();
+
+        let mut lottery = Vec::with_capacity(pool.len());
+        while !pool.is_empty() {
+            let total: f64 = weights.iter().sum();
+            let mut r = rng.gen::<f64>() * total;
+            let mut idx = 0;
+            for (i, w) in weights.iter().enumerate() {
+                r -= *w;
+                if r <= 0.0 {
+                    idx = i;
+                    break;
+                }
+            }
+            lottery.push(pool.remove(idx));
+            weights.remove(idx);
+        }
+
+        // Playoff teams worst-record-first slot in after the lottery.
+        let playoff_order: Vec<TeamId> = by_record
+            .iter()
+            .filter(|t| playoff_teams.contains(&t.id))
+            .map(|t| t.id)
+            .collect();
+
+        lottery.into_iter().chain(playoff_order).collect()
+    }
+
+    /// Make the pick currently on the clock for `player_id` and advance.
+    fn apply_pick(&mut self, player_id: PlayerId) {
+        let (idx, team_id) = match &self.draft {
+            Some(d) if !d.is_complete() => (d.on_clock, d.picks[d.on_clock].team_id),
+            _ => return,
+        };
+        if let Some(d) = self.draft.as_mut() {
+            d.picks[idx].player_id = Some(player_id);
+            d.prospects.retain(|p| *p != player_id);
+            d.on_clock += 1;
+        }
+        if let Some(p) = self.players.iter_mut().find(|p| p.id == player_id) {
+            p.team = Some(team_id);
+        }
+        if let Some(t) = self.teams.iter_mut().find(|t| t.id == team_id) {
+            t.roster.push(player_id);
+        }
+    }
+
+    /// Best available prospect (top few by overall, lightly randomized).
+    fn cpu_choice(&self, rng: &mut impl Rng) -> Option<PlayerId> {
+        let d = self.draft.as_ref()?;
+        let mut pool: Vec<&Player> = d
+            .prospects
+            .iter()
+            .filter_map(|id| self.players.iter().find(|p| p.id == *id))
+            .collect();
+        if pool.is_empty() {
+            return None;
+        }
+        pool.sort_by(|a, b| b.overall().cmp(&a.overall()));
+        let top = pool.len().min(3);
+        Some(pool[rng.gen_range(0..top)].id)
+    }
+
+    pub fn is_user_on_clock(&self) -> bool {
+        self.draft
+            .as_ref()
+            .and_then(|d| d.team_on_clock())
+            .map(|t| Some(t) == self.user_team_id)
+            .unwrap_or(false)
+    }
+
+    pub fn draft_complete(&self) -> bool {
+        self.draft.as_ref().map(|d| d.is_complete()).unwrap_or(true)
+    }
+
+    /// The user drafts a specific prospect (must be their pick).
+    pub fn draft_user_pick(&mut self, player_id: PlayerId) {
+        if self.is_user_on_clock() {
+            self.apply_pick(player_id);
+        }
+    }
+
+    /// CPU auto-picks until the user is on the clock or the draft ends.
+    pub fn draft_sim_to_user(&mut self) {
+        let on = self.draft.as_ref().map(|d| d.on_clock).unwrap_or(0);
+        let mut rng = StdRng::seed_from_u64(self.seed ^ 0xC9_u64.wrapping_mul(7) ^ on as u64);
+        while !self.draft_complete() && !self.is_user_on_clock() {
+            match self.cpu_choice(&mut rng) {
+                Some(pid) => self.apply_pick(pid),
+                None => break,
+            }
+        }
+    }
+
+    /// CPU auto-picks the entire remaining draft (including the user's slots).
+    pub fn draft_sim_all(&mut self) {
+        let on = self.draft.as_ref().map(|d| d.on_clock).unwrap_or(0);
+        let mut rng = StdRng::seed_from_u64(self.seed ^ 0xA11_u64.wrapping_mul(13) ^ on as u64);
+        while !self.draft_complete() {
+            match self.cpu_choice(&mut rng) {
+                Some(pid) => self.apply_pick(pid),
+                None => break,
+            }
+        }
+    }
+
+    // ---- New season ----
+
+    /// Roll into the next season: clear the draft, age players, reset records
+    /// and stats, rebuild the schedule, and tip off. Rosters (including drafted
+    /// rookies) and customizations are kept.
     pub fn start_new_season(&mut self) {
         self.season += 1;
+        self.draft = None;
         for p in &mut self.players {
             p.age = p.age.saturating_add(1);
         }
@@ -468,9 +658,7 @@ impl League {
             t.wins = 0;
             t.losses = 0;
         }
-        for s in &mut self.season_stats {
-            *s = SeasonStats::default();
-        }
+        self.season_stats = vec![SeasonStats::default(); self.players.len()];
         self.playoffs = None;
         let team_ids: Vec<TeamId> = self.teams.iter().map(|t| t.id).collect();
         let mut rng = StdRng::seed_from_u64(self.seed ^ 0x5C4ED_u64 ^ (self.season as u64));
