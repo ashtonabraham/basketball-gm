@@ -1,0 +1,6 @@
+[build]
+release = false
+
+[serve]
+port = 8088
+address = "127.0.0.1"
