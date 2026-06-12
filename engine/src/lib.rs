@@ -16,9 +16,10 @@ pub mod teams_data;
 pub mod types;
 
 pub use league::{League, Phase, PlayoffOutcome, SeasonHistory, SeasonRecap};
-pub use player::{Player, Ratings};
+pub use player::{Player, Ratings, SeasonStats};
 pub use playoffs::{Playoffs, Series, ROUND_NAMES};
 pub use schedule::{Game, GameResult};
+pub use sim::{simulate_game, GameSim, PlayerLine, TeamBox};
 pub use standings::{conference_standings, playoff_seeds, StandingsRow};
 pub use team::Team;
 pub use teams_data::{TeamPreset, PRESETS};

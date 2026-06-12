@@ -4,17 +4,67 @@
 //! the web layer can save/load it to the browser's localStorage as JSON.
 
 use crate::names::{FIRST_NAMES, LAST_NAMES};
-use crate::player::{Player, Ratings};
+use crate::player::{Player, Ratings, SeasonStats};
 use crate::playoffs::{simulate_playoffs, Playoffs};
-use crate::schedule::{generate_schedule, Game};
-use crate::sim::sim_game;
-use crate::standings::playoff_seeds;
+use crate::schedule::{generate_schedule, Game, GameResult};
+use crate::sim::{simulate_game, TeamBox};
+use crate::standings::{conference_standings, playoff_seeds};
 use crate::team::Team;
 use crate::teams_data::PRESETS;
 use crate::types::{Color, Conference, PlayerId, Position, TeamId};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// Generate a player's 8 attributes from a team talent baseline and the
+/// position's identity (e.g. centers dunk and rebound; guards handle and pass).
+fn gen_ratings(pos: Position, talent: f64, rng: &mut impl Rng) -> Ratings {
+    let base = talent + rng.gen_range(-12.0..14.0);
+    let attr = |modifier: f64, rng: &mut dyn rand::RngCore| -> u8 {
+        (base + modifier + rng.gen_range(-8.0..8.0)).clamp(25.0, 99.0) as u8
+    };
+    // (layup, dunk, three, passing, ball_handling, rebounding, defense, athleticism)
+    let m = match pos {
+        Position::PG => (-2.0, -10.0, 6.0, 12.0, 12.0, -10.0, 0.0, 6.0),
+        Position::SG => (0.0, -4.0, 10.0, 2.0, 6.0, -6.0, 0.0, 5.0),
+        Position::SF => (3.0, 2.0, 2.0, 0.0, 0.0, 0.0, 2.0, 3.0),
+        Position::PF => (5.0, 8.0, -4.0, -4.0, -6.0, 8.0, 3.0, 0.0),
+        Position::C => (6.0, 12.0, -10.0, -6.0, -10.0, 12.0, 5.0, -2.0),
+    };
+    Ratings {
+        layup: attr(m.0, rng),
+        dunk: attr(m.1, rng),
+        three: attr(m.2, rng),
+        passing: attr(m.3, rng),
+        ball_handling: attr(m.4, rng),
+        rebounding: attr(m.5, rng),
+        defense: attr(m.6, rng),
+        athleticism: attr(m.7, rng),
+    }
+}
+
+/// Add one game's box score into the running season totals (indexed by id).
+fn accumulate_stats(stats: &mut [SeasonStats], tb: &TeamBox) {
+    for l in &tb.lines {
+        let s = &mut stats[l.player_id as usize];
+        s.gp += 1;
+        s.min += l.min;
+        s.pts += l.pts;
+        s.fgm += l.fgm;
+        s.fga += l.fga;
+        s.tpm += l.tpm;
+        s.tpa += l.tpa;
+        s.ftm += l.ftm;
+        s.fta += l.fta;
+        s.oreb += l.oreb;
+        s.dreb += l.dreb;
+        s.ast += l.ast;
+        s.stl += l.stl;
+        s.blk += l.blk;
+        s.tov += l.tov;
+    }
+}
 
 /// Where we are in the yearly cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +120,8 @@ pub struct League {
     pub user_team_id: Option<TeamId>,
     pub playoffs: Option<Playoffs>,
     pub history: Vec<SeasonHistory>,
+    /// Accumulated regular-season stats, indexed by player id.
+    pub season_stats: Vec<SeasonStats>,
     seed: u64,
     next_player_id: PlayerId,
 }
@@ -87,6 +139,7 @@ impl League {
             user_team_id: None,
             playoffs: None,
             history: Vec::new(),
+            season_stats: Vec::new(),
             seed,
             next_player_id: 0,
         };
@@ -115,6 +168,9 @@ impl League {
             let talent = rng.gen_range(38.0..64.0);
             league.generate_roster(*tid, talent, &mut rng);
         }
+
+        // Size the season-stats table to match the generated players.
+        league.season_stats = vec![SeasonStats::default(); league.players.len()];
 
         // Build the schedule.
         let mut sched_rng = StdRng::seed_from_u64(seed ^ 0x5C4ED_u64);
@@ -191,34 +247,12 @@ impl League {
         let last = LAST_NAMES[rng.gen_range(0..LAST_NAMES.len())];
         let name = format!("{first} {last}");
 
-        // Each attribute is the team talent plus per-player and per-position
-        // variation, clamped to 0–100.
-        let base = talent + rng.gen_range(-12.0..14.0);
-        let attr = |modifier: f64, rng: &mut dyn rand::RngCore| -> u8 {
-            (base + modifier + rng.gen_range(-8.0..8.0)).clamp(25.0, 99.0) as u8
-        };
-        let (inside_m, outside_m, play_m, reb_m, def_m, ath_m) = match pos {
-            Position::PG => (-6.0, 6.0, 10.0, -8.0, 0.0, 4.0),
-            Position::SG => (-2.0, 8.0, 2.0, -6.0, 0.0, 4.0),
-            Position::SF => (2.0, 2.0, 0.0, 0.0, 2.0, 2.0),
-            Position::PF => (6.0, -4.0, -4.0, 6.0, 2.0, 0.0),
-            Position::C => (8.0, -8.0, -6.0, 10.0, 4.0, -2.0),
-        };
-        let ratings = Ratings {
-            inside: attr(inside_m, rng),
-            outside: attr(outside_m, rng),
-            playmaking: attr(play_m, rng),
-            rebounding: attr(reb_m, rng),
-            defense: attr(def_m, rng),
-            athleticism: attr(ath_m, rng),
-        };
-
         Player {
             id,
             name,
             age: rng.gen_range(19..=38),
             position: pos,
-            ratings,
+            ratings: gen_ratings(pos, talent, rng),
             team: Some(team_id),
         }
     }
@@ -238,18 +272,9 @@ impl League {
         self.current_day().is_none()
     }
 
-    fn team_strength(&self, team_id: TeamId) -> f64 {
-        self.teams
-            .iter()
-            .find(|t| t.id == team_id)
-            .map(|t| t.strength(&self.players))
-            .unwrap_or(50.0)
-    }
-
-    /// Simulate every game on the given day, updating team records.
+    /// Simulate every game on the given day, updating records and stats.
     fn sim_specific_day(&mut self, day: u32) {
         let mut rng = StdRng::seed_from_u64(self.seed.wrapping_mul(1_000_003).wrapping_add(day as u64));
-        // Collect strengths first to avoid borrow conflicts.
         let indices: Vec<usize> = self
             .schedule
             .iter()
@@ -257,18 +282,29 @@ impl League {
             .filter(|(_, g)| g.day == day && !g.is_played())
             .map(|(i, _)| i)
             .collect();
-        for i in indices {
-            let (home, away) = (self.schedule[i].home, self.schedule[i].away);
-            let hs = self.team_strength(home);
-            let as_ = self.team_strength(away);
-            let res = sim_game(hs, as_, &mut rng);
-            // Update records.
-            let (hw, aw) = if res.home_won() { (true, false) } else { (false, true) };
-            if let Some(t) = self.teams.iter_mut().find(|t| t.id == home) {
-                if hw { t.wins += 1 } else { t.losses += 1 }
+
+        // Simulate first (immutable borrows of teams/players only).
+        let mut sims = Vec::with_capacity(indices.len());
+        for &i in &indices {
+            let home_id = self.schedule[i].home;
+            let away_id = self.schedule[i].away;
+            let home = self.teams.iter().find(|t| t.id == home_id).unwrap();
+            let away = self.teams.iter().find(|t| t.id == away_id).unwrap();
+            let g = simulate_game(home, away, &self.players, &mut rng);
+            sims.push((i, g));
+        }
+
+        // Apply results: stats, records, and the stored final score.
+        for (i, g) in sims {
+            accumulate_stats(&mut self.season_stats, &g.home);
+            accumulate_stats(&mut self.season_stats, &g.away);
+            let res = GameResult { home_score: g.home.score, away_score: g.away.score };
+            let home_won = res.home_won();
+            if let Some(t) = self.teams.iter_mut().find(|t| t.id == g.home.team_id) {
+                if home_won { t.wins += 1 } else { t.losses += 1 }
             }
-            if let Some(t) = self.teams.iter_mut().find(|t| t.id == away) {
-                if aw { t.wins += 1 } else { t.losses += 1 }
+            if let Some(t) = self.teams.iter_mut().find(|t| t.id == g.away.team_id) {
+                if home_won { t.losses += 1 } else { t.wins += 1 }
             }
             self.schedule[i].result = Some(res);
         }
@@ -301,28 +337,33 @@ impl League {
 
     // ---- Playoffs ----
 
-    /// Seed the bracket from final standings and play it out.
+    /// Seed the bracket from final standings and play it out with the full
+    /// possession sim.
     pub fn start_playoffs(&mut self) {
         assert!(self.regular_season_complete(), "regular season not finished");
         let east = playoff_seeds(&self.teams, Conference::East);
         let west = playoff_seeds(&self.teams, Conference::West);
 
-        // Snapshot strengths so the closure doesn't borrow self mutably.
-        let strengths: Vec<(TeamId, f64)> = self
-            .teams
-            .iter()
-            .map(|t| (t.id, t.strength(&self.players)))
-            .collect();
-        let strength = |id: TeamId| {
-            strengths
-                .iter()
-                .find(|(tid, _)| *tid == id)
-                .map(|(_, s)| *s)
-                .unwrap_or(50.0)
-        };
+        // Map every team to its conference seed (1 = best) for home-court.
+        let mut seed_of_map: HashMap<TeamId, u32> = HashMap::new();
+        for conf in [Conference::East, Conference::West] {
+            for row in conference_standings(&self.teams, conf) {
+                seed_of_map.insert(row.team_id, row.seed);
+            }
+        }
+        let seed_of = |id: TeamId| *seed_of_map.get(&id).unwrap_or(&99);
 
         let mut rng = StdRng::seed_from_u64(self.seed ^ 0x71A04FF_u64);
-        let po = simulate_playoffs(&east, &west, strength, &mut rng);
+        let teams = &self.teams;
+        let players = &self.players;
+        let sim = |home_id: TeamId, away_id: TeamId| -> GameResult {
+            let home = teams.iter().find(|t| t.id == home_id).unwrap();
+            let away = teams.iter().find(|t| t.id == away_id).unwrap();
+            let g = simulate_game(home, away, players, &mut rng);
+            GameResult { home_score: g.home.score, away_score: g.away.score }
+        };
+
+        let po = simulate_playoffs(&east, &west, seed_of, sim);
         self.playoffs = Some(po);
         self.phase = Phase::Playoffs;
     }
@@ -426,6 +467,9 @@ impl League {
         for t in &mut self.teams {
             t.wins = 0;
             t.losses = 0;
+        }
+        for s in &mut self.season_stats {
+            *s = SeasonStats::default();
         }
         self.playoffs = None;
         let team_ids: Vec<TeamId> = self.teams.iter().map(|t| t.id).collect();
