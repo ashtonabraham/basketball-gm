@@ -142,6 +142,14 @@ fn TopBar() -> impl IntoView {
     };
     let view_recap = move |_| state.update_league(|l| l.finish_season());
 
+    // Playoff stepping.
+    let po_complete = move || state.league.with(|l| l.playoffs_complete());
+    let user_alive = move || state.league.with(|l| l.user_still_in_playoffs());
+    let sim_game = move |_| state.update_league(|l| { l.playoff_sim_gameday(); });
+    let sim_to_my = move |_| state.update_league(|l| l.playoff_sim_to_user_game());
+    let sim_round = move |_| state.update_league(|l| l.playoff_sim_round());
+    let sim_po_all = move |_| state.update_league(|l| l.playoff_sim_all());
+
     view! {
         <div class="topbar">
             <div class="topbar-status">
@@ -161,7 +169,20 @@ fn TopBar() -> impl IntoView {
                         <button class="btn btn-primary" on:click=start_po>"Start Playoffs \u{2192}"</button>
                     }.into_any(),
                     (Phase::Playoffs, _) => view! {
-                        <button class="btn btn-primary" on:click=view_recap>"Season Recap \u{2192}"</button>
+                        {move || if po_complete() {
+                            view! {
+                                <button class="btn btn-primary" on:click=view_recap>"Season Recap \u{2192}"</button>
+                            }.into_any()
+                        } else {
+                            view! {
+                                <button class="btn btn-primary" on:click=sim_game>"Sim Game"</button>
+                                <Show when=user_alive>
+                                    <button class="btn" on:click=sim_to_my>"Sim to My Game"</button>
+                                </Show>
+                                <button class="btn" on:click=sim_round>"Sim Round"</button>
+                                <button class="btn" on:click=sim_po_all>"Sim Playoffs"</button>
+                            }.into_any()
+                        }}
                     }.into_any(),
                     _ => view! { <span></span> }.into_any(),
                 }}
@@ -287,7 +308,7 @@ fn RosterPanel() -> impl IntoView {
                 .filter_map(|pid| l.players.iter().find(|p| p.id == *pid))
                 .map(|p| {
                     let r = &p.ratings;
-                    (p.name.clone(), p.position.abbrev(), p.age, p.overall(),
+                    (p.name.clone(), p.position.abbrev(), p.age, p.overall(), p.potential,
                      r.layup, r.dunk, r.three, r.passing, r.ball_handling,
                      r.rebounding, r.defense, r.athleticism)
                 })
@@ -303,18 +324,21 @@ fn RosterPanel() -> impl IntoView {
             <table class="tbl">
                 <thead><tr>
                     <th class="left">"Player"</th><th>"Pos"</th><th>"Age"</th><th>"OVR"</th>
+                    <th title="Potential (peak overall)">"POT"</th>
                     <th title="Layup">"Lay"</th><th title="Dunk">"Dnk"</th><th title="Three-point">"3pt"</th>
                     <th title="Passing">"Pas"</th><th title="Ball handling">"Hdl"</th>
                     <th title="Rebounding">"Reb"</th><th title="Defense">"Def"</th><th title="Athleticism">"Ath"</th>
                 </tr></thead>
                 <tbody>
-                    {move || players().into_iter().map(|(name, pos, age, ovr, lay, dnk, three, pas, hdl, reb, def, ath)| {
+                    {move || players().into_iter().map(|(name, pos, age, ovr, pot, lay, dnk, three, pas, hdl, reb, def, ath)| {
+                        let upside = pot > ovr;
                         view! {
                             <tr class="row">
                                 <td class="left">{name}</td>
                                 <td>{pos}</td>
                                 <td>{age}</td>
                                 <td><span class="ovr">{ovr}</span></td>
+                                <td><span class=if upside { "pot up" } else { "pot" }>{pot}</span></td>
                                 <td>{lay}</td><td>{dnk}</td><td>{three}</td>
                                 <td>{pas}</td><td>{hdl}</td>
                                 <td>{reb}</td><td>{def}</td><td>{ath}</td>
@@ -441,8 +465,8 @@ fn ResultsBar() -> impl IntoView {
                     let r = g.result?;
                     let (us, them) = if home { (r.home_score, r.away_score) } else { (r.away_score, r.home_score) };
                     let win = us > them;
-                    let tip = format!("{} {}\u{2013}{} {} {}", if win { "W" } else { "L" }, us, them, if home { "vs" } else { "@" }, opp);
-                    Some((win, tip))
+                    let loc = if home { "vs" } else { "@" };
+                    Some((win, loc, opp, us, them))
                 })
                 .collect::<Vec<_>>()
         })
@@ -451,10 +475,12 @@ fn ResultsBar() -> impl IntoView {
     view! {
         <Show when=move || !games().is_empty()>
             <div class="results-bar">
-                {move || games().into_iter().map(|(win, tip)| {
+                {move || games().into_iter().map(|(win, loc, opp, us, them)| {
+                    let tip = format!("{} {}\u{2013}{} {} {}", if win { "W" } else { "L" }, us, them, loc, opp);
                     view! {
-                        <span class=if win { "result-box w" } else { "result-box l" } title=tip>
-                            {if win { "W" } else { "L" }}
+                        <span class=if win { "result-chip w" } else { "result-chip l" } title=tip>
+                            <span class="rc-top">{if win { "W" } else { "L" }}" "{loc}" "{opp.clone()}</span>
+                            <span class="rc-score">{format!("{}\u{2013}{}", us, them)}</span>
                         </span>
                     }
                 }).collect_view()}

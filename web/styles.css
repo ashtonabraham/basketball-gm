@@ -170,16 +170,18 @@ body {
   padding: .6rem 1.5rem; border-bottom: 1px solid var(--border);
   overflow-x: auto; white-space: nowrap;
 }
-.result-box {
+.result-chip {
   flex: 0 0 auto;
-  width: 20px; height: 22px; border-radius: 4px;
-  display: inline-flex; align-items: center; justify-content: center;
-  font-size: .68rem; font-weight: 800; color: #fff; cursor: default;
+  display: inline-flex; flex-direction: column; align-items: center; justify-content: center;
+  min-width: 58px; padding: .25rem .35rem; border-radius: 6px;
+  color: #fff; cursor: default; line-height: 1.15;
   transition: transform .08s ease;
 }
-.result-box:hover { transform: scale(1.25); }
-.result-box.w { background: #2faa55; }
-.result-box.l { background: #e0413a; }
+.result-chip:hover { transform: translateY(-2px); }
+.result-chip.w { background: #2faa55; }
+.result-chip.l { background: #e0413a; }
+.rc-top { font-size: .64rem; font-weight: 800; letter-spacing: .02em; }
+.rc-score { font-size: .7rem; font-weight: 700; opacity: .95; }
 
 .panel { padding: 1.5rem; }
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
@@ -211,6 +213,17 @@ body {
   display: inline-block; min-width: 30px; padding: .1rem .4rem; border-radius: 6px;
   background: var(--panel-2); font-weight: 800;
 }
+.pot { font-weight: 700; color: var(--muted); }
+.pot.up { color: var(--accent); }
+.grade { font-weight: 800; }
+.conf { color: var(--accent); font-size: .6rem; margin-left: .3rem; letter-spacing: -1px; }
+.prospect-actions { display: flex; gap: .3rem; justify-content: flex-end; }
+.mini-btn {
+  background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+  border-radius: 6px; padding: .2rem .5rem; font-size: .72rem; font-weight: 700; cursor: pointer;
+}
+.mini-btn:hover { background: var(--row-hover); }
+.mini-btn.draft { background: var(--accent); border-color: var(--accent); color: #fff; }
 
 /* Playoffs bracket */
 .champ-banner {

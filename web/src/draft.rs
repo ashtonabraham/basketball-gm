@@ -122,6 +122,7 @@ fn ProspectBoard() -> impl IntoView {
     let state = expect_context::<AppState>();
     let league = state.league;
     let user_on = move || league.with(|l| l.is_user_on_clock());
+    let scout_left = move || league.with(|l| l.draft.as_ref().map(|d| d.scout_points).unwrap_or(0));
 
     let prospects = move || {
         league.with(|l| {
@@ -132,7 +133,13 @@ fn ProspectBoard() -> impl IntoView {
                 .filter_map(|id| l.players.iter().find(|p| p.id == *id))
                 .map(|p| {
                     let r = &p.ratings;
-                    (p.id, p.name.clone(), p.position.abbrev(), p.age, p.overall(),
+                    // Scouted potential = a fuzzy letter grade until drafted.
+                    let (grade, conf) = d
+                        .scouting
+                        .get(&p.id)
+                        .map(|s| (s.grade().to_string(), s.confidence()))
+                        .unwrap_or_else(|| ("?".into(), 0));
+                    (p.id, p.name.clone(), p.position.abbrev(), p.age, p.overall(), grade, conf,
                      r.three, r.layup, r.dunk, r.passing, r.ball_handling, r.rebounding, r.defense, r.athleticism)
                 })
                 .collect();
@@ -142,33 +149,48 @@ fn ProspectBoard() -> impl IntoView {
     };
 
     let pick = move |pid: u32| state.update_league(move |l| l.draft_user_pick(pid));
+    let scout = move |pid: u32| state.update_league(move |l| l.scout_prospect(pid));
 
     view! {
         <div class="card draft-prospects">
             <h3 class="card-title">
                 "Available Prospects"
-                {move || if user_on() { view! { <span class="pick-hint">" — click a player to draft"</span> }.into_any() } else { view! { <span></span> }.into_any() }}
+                <span class="pick-hint">{move || format!(" — Scouting: {} left", scout_left())}</span>
             </h3>
             <table class="tbl">
                 <thead><tr>
                     <th class="left">"Prospect"</th><th>"Pos"</th><th>"Age"</th><th>"OVR"</th>
+                    <th title="Scouted potential">"POT"</th>
                     <th>"3pt"</th><th>"Lay"</th><th>"Dnk"</th><th>"Pas"</th><th>"Hdl"</th>
-                    <th>"Reb"</th><th>"Def"</th><th>"Ath"</th>
+                    <th>"Reb"</th><th>"Def"</th><th>"Ath"</th><th></th>
                 </tr></thead>
                 <tbody>
                     {move || {
-                        let clickable = user_on();
-                        prospects().into_iter().map(move |(id, name, pos, age, ovr, three, lay, dnk, pas, hdl, reb, def, ath)| {
-                            let cls = if clickable { "row pickable" } else { "row" };
+                        let can_pick = user_on();
+                        let can_scout = scout_left() > 0;
+                        prospects().into_iter().map(move |(id, name, pos, age, ovr, grade, conf, three, lay, dnk, pas, hdl, reb, def, ath)| {
+                            let dots = "\u{25cf}".repeat(conf as usize) + &"\u{25cb}".repeat(3 - conf as usize);
                             view! {
-                                <tr class=cls on:click=move |_| if clickable { pick(id) }>
+                                <tr class="row">
                                     <td class="left">{name}</td>
                                     <td>{pos}</td>
                                     <td>{age}</td>
                                     <td><span class="ovr">{ovr}</span></td>
+                                    <td>
+                                        <span class="grade">{grade}</span>
+                                        <span class="conf" title="Scouting confidence">{dots}</span>
+                                    </td>
                                     <td>{three}</td><td>{lay}</td><td>{dnk}</td>
                                     <td>{pas}</td><td>{hdl}</td>
                                     <td>{reb}</td><td>{def}</td><td>{ath}</td>
+                                    <td class="prospect-actions">
+                                        <Show when=move || can_scout>
+                                            <button class="mini-btn" title="Spend a scouting point" on:click=move |_| scout(id)>"Scout"</button>
+                                        </Show>
+                                        <Show when=move || can_pick>
+                                            <button class="mini-btn draft" on:click=move |_| pick(id)>"Draft"</button>
+                                        </Show>
+                                    </td>
                                 </tr>
                             }
                         }).collect_view()
