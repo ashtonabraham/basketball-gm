@@ -3,10 +3,10 @@
 //! This is the single object the UI holds. It is fully `serde`-serializable, so
 //! the web layer can save/load it to the browser's localStorage as JSON.
 
-use crate::draft::{Draft, DraftPick};
+use crate::draft::{Draft, DraftPick, ScoutEntry};
 use crate::names::{FIRST_NAMES, LAST_NAMES};
 use crate::player::{Player, Ratings, SeasonStats};
-use crate::playoffs::{simulate_playoffs, Playoffs};
+use crate::playoffs::{first_round_pairs, high_seed_hosts, Playoffs, Series};
 use crate::schedule::{generate_schedule, Game, GameResult};
 use crate::sim::{simulate_game, TeamBox};
 use crate::standings::{conference_standings, playoff_seeds};
@@ -42,6 +42,51 @@ fn gen_ratings(pos: Position, talent: f64, rng: &mut impl Rng) -> Ratings {
         rebounding: attr(m.5, rng),
         defense: attr(m.6, rng),
         athleticism: attr(m.7, rng),
+    }
+}
+
+/// A player's peak-overall ceiling: current overall plus age-dependent upside.
+fn gen_potential(ovr: u8, age: u8, rng: &mut impl Rng) -> u8 {
+    let room: u32 = match age {
+        0..=20 => rng.gen_range(6..=26),
+        21..=22 => rng.gen_range(4..=20),
+        23..=24 => rng.gen_range(2..=12),
+        25..=26 => rng.gen_range(0..=6),
+        _ => 0,
+    };
+    (ovr as u32 + room).min(99) as u8
+}
+
+/// Apply an approximately uniform per-attribute change of `d` (with a little
+/// noise), clamped to a sane range. Raising every attribute by `d` moves the
+/// overall by roughly `d`.
+fn apply_attr_delta(r: &mut Ratings, d: i32, rng: &mut impl Rng) {
+    let bump = |v: &mut u8, rng: &mut dyn rand::RngCore| {
+        *v = (*v as i32 + d + rng.gen_range(-1..=1)).clamp(25, 99) as u8;
+    };
+    bump(&mut r.layup, rng);
+    bump(&mut r.dunk, rng);
+    bump(&mut r.three, rng);
+    bump(&mut r.passing, rng);
+    bump(&mut r.ball_handling, rng);
+    bump(&mut r.rebounding, rng);
+    bump(&mut r.defense, rng);
+    bump(&mut r.athleticism, rng);
+}
+
+/// One offseason of development: young players grow toward their potential,
+/// veterans decline. Called after ages are incremented.
+fn develop_player(p: &mut Player, rng: &mut impl Rng) {
+    let ovr = p.overall();
+    if p.age <= 26 && ovr < p.potential {
+        let room = (p.potential - ovr) as f64;
+        let gain = (room * rng.gen_range(0.20..0.50)).round() as i32;
+        let gain = gain.max(1).min((p.potential - ovr) as i32);
+        apply_attr_delta(&mut p.ratings, gain, rng);
+    } else if p.age >= 31 {
+        let severity = (p.age as i32 - 30).max(0);
+        let loss = (rng.gen_range(1.0..3.0) + severity as f64 * 0.4).round() as i32;
+        apply_attr_delta(&mut p.ratings, -loss, rng);
     }
 }
 
@@ -253,14 +298,10 @@ impl League {
         let last = LAST_NAMES[rng.gen_range(0..LAST_NAMES.len())];
         let name = format!("{first} {last}");
 
-        Player {
-            id,
-            name,
-            age: rng.gen_range(19..=38),
-            position: pos,
-            ratings: gen_ratings(pos, talent, rng),
-            team: Some(team_id),
-        }
+        let age = rng.gen_range(19..=38);
+        let ratings = gen_ratings(pos, talent, rng);
+        let potential = gen_potential(ratings.overall(), age, rng);
+        Player { id, name, age, position: pos, ratings, potential, team: Some(team_id) }
     }
 
     // ---- Regular season ----
@@ -341,37 +382,191 @@ impl League {
         while self.sim_day().is_some() {}
     }
 
-    // ---- Playoffs ----
+    // ---- Playoffs (advanced one game-day at a time) ----
 
-    /// Seed the bracket from final standings and play it out with the full
-    /// possession sim.
+    /// Map every team to its conference seed (1 = best) for home-court.
+    fn seed_map(&self) -> HashMap<TeamId, u32> {
+        let mut m = HashMap::new();
+        for conf in [Conference::East, Conference::West] {
+            for row in conference_standings(&self.teams, conf) {
+                m.insert(row.team_id, row.seed);
+            }
+        }
+        m
+    }
+
+    /// Seed the first-round bracket from final standings. No games are played
+    /// yet — use the `playoff_sim_*` methods to advance.
     pub fn start_playoffs(&mut self) {
         assert!(self.regular_season_complete(), "regular season not finished");
         let east = playoff_seeds(&self.teams, Conference::East);
         let west = playoff_seeds(&self.teams, Conference::West);
 
-        // Map every team to its conference seed (1 = best) for home-court.
-        let mut seed_of_map: HashMap<TeamId, u32> = HashMap::new();
-        for conf in [Conference::East, Conference::West] {
-            for row in conference_standings(&self.teams, conf) {
-                seed_of_map.insert(row.team_id, row.seed);
+        let mut round0 = Vec::with_capacity(8);
+        for (h, l) in first_round_pairs(&east).into_iter().chain(first_round_pairs(&west)) {
+            round0.push(Series::new(h, l));
+        }
+        self.playoffs = Some(Playoffs { rounds: vec![round0], champion: None });
+        self.phase = Phase::Playoffs;
+    }
+
+    pub fn playoffs_complete(&self) -> bool {
+        self.playoffs.as_ref().map(|p| p.champion.is_some()).unwrap_or(false)
+    }
+
+    /// Is the current (deepest) round fully decided?
+    fn current_round_decided(&self) -> bool {
+        self.playoffs
+            .as_ref()
+            .and_then(|p| p.rounds.last())
+            .map(|r| r.iter().all(|s| s.is_decided()))
+            .unwrap_or(true)
+    }
+
+    /// Does the user's team have a game on the next game-day (i.e. it is in an
+    /// undecided series in the current round)?
+    pub fn user_plays_next_playoff_game(&self) -> bool {
+        let Some(uid) = self.user_team_id else { return false };
+        let Some(po) = &self.playoffs else { return false };
+        if po.champion.is_some() {
+            return false;
+        }
+        po.rounds
+            .last()
+            .map(|r| r.iter().any(|s| !s.is_decided() && s.has_team(uid)))
+            .unwrap_or(false)
+    }
+
+    /// Build the next round's pairings from the current round's winners.
+    fn build_next_round(&mut self) {
+        let seed_of = self.seed_map();
+        let Some(po) = self.playoffs.as_mut() else { return };
+        let last = po.rounds.last().unwrap();
+        let winners: Vec<TeamId> = last.iter().map(|s| s.winner().unwrap()).collect();
+        // Pair adjacent winners; the better seed becomes the higher seed.
+        let mut next = Vec::with_capacity(winners.len() / 2);
+        for pair in winners.chunks(2) {
+            let (a, b) = (pair[0], pair[1]);
+            let a_seed = *seed_of.get(&a).unwrap_or(&99);
+            let b_seed = *seed_of.get(&b).unwrap_or(&99);
+            let (high, low) = if a_seed <= b_seed { (a, b) } else { (b, a) };
+            next.push(Series::new(high, low));
+        }
+        po.rounds.push(next);
+    }
+
+    /// Play exactly one game in the given series of the current round.
+    fn play_playoff_game(&mut self, series_idx: usize, rng: &mut impl Rng) {
+        // Read the matchup and home/away first (immutable borrows).
+        let (home_id, away_id) = {
+            let po = self.playoffs.as_ref().unwrap();
+            let s = &po.rounds.last().unwrap()[series_idx];
+            let game_no = s.games_played() + 1;
+            if high_seed_hosts(game_no) {
+                (s.high, s.low)
+            } else {
+                (s.low, s.high)
+            }
+        };
+        let home = self.teams.iter().find(|t| t.id == home_id).unwrap();
+        let away = self.teams.iter().find(|t| t.id == away_id).unwrap();
+        let g = simulate_game(home, away, &self.players, rng);
+        let res = GameResult { home_score: g.home.score, away_score: g.away.score };
+
+        // Record the result.
+        let po = self.playoffs.as_mut().unwrap();
+        let round = po.rounds.last_mut().unwrap();
+        let s = &mut round[series_idx];
+        let high_won = if home_id == s.high { res.home_won() } else { !res.home_won() };
+        if high_won {
+            s.high_wins += 1;
+        } else {
+            s.low_wins += 1;
+        }
+        s.games.push(res);
+    }
+
+    /// Advance one play-off game-day: every live series in the current round
+    /// plays its next game. Auto-builds the next round (or crowns a champion)
+    /// when a round completes. Returns false if the playoffs are over.
+    pub fn playoff_sim_gameday(&mut self) -> bool {
+        if self.playoffs.is_none() || self.playoffs_complete() {
+            return false;
+        }
+        // If the current round is done, advance the bracket before playing.
+        if self.current_round_decided() {
+            let last_idx = self.playoffs.as_ref().unwrap().rounds.len() - 1;
+            if last_idx >= 3 {
+                // Finals decided — crown the champion.
+                let champ = self.playoffs.as_ref().unwrap().rounds[3][0].winner();
+                self.playoffs.as_mut().unwrap().champion = champ;
+                return false;
+            }
+            self.build_next_round();
+        }
+
+        // Play one game in each undecided series of the current round.
+        let n = self.playoffs.as_ref().unwrap().rounds.last().unwrap().len();
+        let played = self.playoffs.as_ref().unwrap().rounds.iter().flatten().map(|s| s.games.len()).sum::<usize>();
+        let mut rng = StdRng::seed_from_u64(self.seed ^ 0x71A04FF_u64 ^ played as u64);
+        for i in 0..n {
+            let undecided = !self.playoffs.as_ref().unwrap().rounds.last().unwrap()[i].is_decided();
+            if undecided {
+                self.play_playoff_game(i, &mut rng);
             }
         }
-        let seed_of = |id: TeamId| *seed_of_map.get(&id).unwrap_or(&99);
 
-        let mut rng = StdRng::seed_from_u64(self.seed ^ 0x71A04FF_u64);
-        let teams = &self.teams;
-        let players = &self.players;
-        let sim = |home_id: TeamId, away_id: TeamId| -> GameResult {
-            let home = teams.iter().find(|t| t.id == home_id).unwrap();
-            let away = teams.iter().find(|t| t.id == away_id).unwrap();
-            let g = simulate_game(home, away, players, &mut rng);
-            GameResult { home_score: g.home.score, away_score: g.away.score }
-        };
+        // If that completed the Finals, crown immediately.
+        if self.current_round_decided() {
+            let last_idx = self.playoffs.as_ref().unwrap().rounds.len() - 1;
+            if last_idx >= 3 {
+                let champ = self.playoffs.as_ref().unwrap().rounds[3][0].winner();
+                self.playoffs.as_mut().unwrap().champion = champ;
+            }
+        }
+        true
+    }
 
-        let po = simulate_playoffs(&east, &west, seed_of, sim);
-        self.playoffs = Some(po);
-        self.phase = Phase::Playoffs;
+    /// Sim game-days until the user's team is about to play (so the user can sim
+    /// that game themselves), or the playoffs end.
+    pub fn playoff_sim_to_user_game(&mut self) {
+        // If the user already has a game pending now, do nothing.
+        while !self.playoffs_complete() && !self.user_plays_next_playoff_game() {
+            if !self.playoff_sim_gameday() {
+                break;
+            }
+        }
+    }
+
+    /// Is the user's team still alive in the bracket (not yet eliminated)?
+    pub fn user_still_in_playoffs(&self) -> bool {
+        let Some(uid) = self.user_team_id else { return false };
+        let Some(po) = &self.playoffs else { return false };
+        if po.champion == Some(uid) {
+            return true;
+        }
+        // Alive if it appears in the current (deepest) round.
+        po.rounds.last().map(|r| r.iter().any(|s| s.has_team(uid))).unwrap_or(false)
+    }
+
+    /// Sim game-days until the current round (the deepest at call time) is fully
+    /// decided, then stop before the next round begins.
+    pub fn playoff_sim_round(&mut self) {
+        let Some(target) = self.playoffs.as_ref().map(|p| p.rounds.len() - 1) else { return };
+        while !self.playoffs_complete() {
+            let cur = self.playoffs.as_ref().unwrap().rounds.len() - 1;
+            if cur == target && self.current_round_decided() {
+                break;
+            }
+            if !self.playoff_sim_gameday() {
+                break;
+            }
+        }
+    }
+
+    /// Sim the entire remaining postseason.
+    pub fn playoff_sim_all(&mut self) {
+        while self.playoff_sim_gameday() {}
     }
 
     // ---- Recap / new season ----
@@ -485,12 +680,18 @@ impl League {
             self.next_player_id += 1;
             let first = FIRST_NAMES[rng.gen_range(0..FIRST_NAMES.len())];
             let last = LAST_NAMES[rng.gen_range(0..LAST_NAMES.len())];
+            let age = rng.gen_range(19..=22);
+            let ratings = gen_ratings(pos, talent, &mut rng);
+            // Prospects skew toward upside: a guaranteed chunk of growth room.
+            let base_pot = gen_potential(ratings.overall(), age, &mut rng);
+            let potential = (base_pot as u32 + rng.gen_range(0..=6)).min(99) as u8;
             self.players.push(Player {
                 id,
                 name: format!("{first} {last}"),
-                age: rng.gen_range(19..=22),
+                age,
                 position: pos,
-                ratings: gen_ratings(pos, talent, &mut rng),
+                ratings,
+                potential,
                 team: None,
             });
             prospects.push(id);
@@ -512,8 +713,39 @@ impl League {
             }
         }
 
-        self.draft = Some(Draft { picks, prospects, on_clock: 0 });
+        // Initial (fuzzy) scouting read on every prospect.
+        let mut scouting = HashMap::new();
+        for &pid in &prospects {
+            let pot = self.players.iter().find(|p| p.id == pid).map(|p| p.potential as f64).unwrap_or(50.0);
+            let uncertainty = 14.0;
+            let noise = (rng.gen::<f64>() + rng.gen::<f64>() - 1.0) * uncertainty; // ~[-u, u], centered
+            scouting.insert(pid, ScoutEntry { estimate: (pot + noise).clamp(30.0, 99.0), uncertainty });
+        }
+
+        self.draft = Some(Draft { picks, prospects, on_clock: 0, scouting, scout_points: 25 });
         self.phase = Phase::Draft;
+    }
+
+    /// Spend one scouting point on a prospect: tighten the uncertainty and
+    /// re-estimate his potential (the grade may rise or fall as info improves).
+    pub fn scout_prospect(&mut self, pid: PlayerId) {
+        let remaining = self.draft.as_ref().map(|d| d.scout_points).unwrap_or(0);
+        if remaining == 0 {
+            return;
+        }
+        let pot = match self.players.iter().find(|p| p.id == pid) {
+            Some(p) => p.potential as f64,
+            None => return,
+        };
+        let mut rng =
+            StdRng::seed_from_u64(self.seed ^ 0x5C0_u64 ^ (pid as u64) ^ ((remaining as u64) << 8));
+        if let Some(d) = self.draft.as_mut() {
+            let Some(entry) = d.scouting.get_mut(&pid) else { return };
+            entry.uncertainty *= 0.55;
+            let noise = (rng.gen::<f64>() + rng.gen::<f64>() - 1.0) * entry.uncertainty;
+            entry.estimate = (pot + noise).clamp(30.0, 99.0);
+            d.scout_points -= 1;
+        }
     }
 
     /// Round-1 order: a weighted lottery among the 16 non-playoff teams (worst
@@ -651,8 +883,11 @@ impl League {
     pub fn start_new_season(&mut self) {
         self.season += 1;
         self.draft = None;
+        // Age and develop every player (young grow toward potential, vets decline).
+        let mut dev_rng = StdRng::seed_from_u64(self.seed ^ 0xDE7_u64 ^ (self.season as u64));
         for p in &mut self.players {
             p.age = p.age.saturating_add(1);
+            develop_player(p, &mut dev_rng);
         }
         for t in &mut self.teams {
             t.wins = 0;

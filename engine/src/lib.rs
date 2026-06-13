@@ -16,7 +16,7 @@ pub mod team;
 pub mod teams_data;
 pub mod types;
 
-pub use draft::{Draft, DraftPick};
+pub use draft::{grade_for, Draft, DraftPick, ScoutEntry};
 pub use league::{League, Phase, PlayoffOutcome, SeasonHistory, SeasonRecap};
 pub use player::{Player, Ratings, SeasonStats};
 pub use playoffs::{Playoffs, Series, ROUND_NAMES};
@@ -53,11 +53,17 @@ mod integration_tests {
             assert_eq!(t.games_played(), 82, "{} played {}", t.full_name(), t.games_played());
         }
 
-        // Run the playoffs.
+        // Run the playoffs game-day by game-day.
         league.start_playoffs();
         assert_eq!(league.phase, Phase::Playoffs);
+        assert!(league.playoffs.as_ref().unwrap().champion.is_none());
+        league.playoff_sim_all();
+        assert!(league.playoffs_complete());
         let po = league.playoffs.as_ref().unwrap();
         assert!(po.champion.is_some());
+        // Bracket fully formed: 8 + 4 + 2 + 1 series.
+        let series_counts: Vec<usize> = po.rounds.iter().map(|r| r.len()).collect();
+        assert_eq!(series_counts, vec![8, 4, 2, 1]);
 
         // Recap and finish.
         let recap = league.season_recap().expect("recap exists");
@@ -69,11 +75,37 @@ mod integration_tests {
     }
 
     #[test]
+    fn playoffs_advance_one_gameday_at_a_time() {
+        let mut league = League::new(7);
+        league.select_team(0);
+        league.sim_to_end_of_season();
+        league.start_playoffs();
+
+        // One game-day plays exactly one game in each of the 8 first-round series.
+        league.playoff_sim_gameday();
+        let po = league.playoffs.as_ref().unwrap();
+        assert_eq!(po.rounds.len(), 1);
+        for s in &po.rounds[0] {
+            assert_eq!(s.games_played(), 1);
+        }
+
+        // Finish it out; a champion emerges and no series exceeds 7 games.
+        league.playoff_sim_all();
+        assert!(league.playoffs_complete());
+        for round in &league.playoffs.as_ref().unwrap().rounds {
+            for s in round {
+                assert!((4..=7).contains(&s.games_played()));
+            }
+        }
+    }
+
+    #[test]
     fn draft_runs_and_fills_every_pick() {
         let mut league = League::new(99);
         league.select_team(3);
         league.sim_to_end_of_season();
         league.start_playoffs();
+        league.playoff_sim_all();
         league.finish_season();
 
         let players_before = league.players.len();
@@ -113,6 +145,52 @@ mod integration_tests {
         assert!(league.draft.is_none());
         assert_eq!(league.phase, Phase::RegularSeason);
         assert!(league.teams.iter().all(|t| t.games_played() == 0));
+    }
+
+    #[test]
+    fn young_players_develop_toward_potential() {
+        let mut league = League::new(5);
+        league.select_team(0);
+
+        // Find a young player with real upside.
+        let pid = league
+            .players
+            .iter()
+            .find(|p| p.age <= 21 && p.potential >= p.overall() + 8)
+            .map(|p| p.id)
+            .expect("a young high-upside player exists");
+        let before = league.players.iter().find(|p| p.id == pid).unwrap().overall();
+
+        // Run a few offseasons of development.
+        for _ in 0..3 {
+            league.sim_to_end_of_season();
+            league.start_playoffs();
+            league.playoff_sim_all();
+            league.finish_season();
+            league.start_new_season();
+        }
+        let after = league.players.iter().find(|p| p.id == pid).unwrap().overall();
+        assert!(after > before, "young player {before}->{after} did not grow");
+    }
+
+    #[test]
+    fn scouting_refines_estimates() {
+        let mut league = League::new(8);
+        league.select_team(0);
+        league.sim_to_end_of_season();
+        league.start_playoffs();
+        league.playoff_sim_all();
+        league.finish_season();
+        league.enter_draft();
+
+        let pid = league.draft.as_ref().unwrap().prospects[0];
+        let u0 = league.draft.as_ref().unwrap().scouting[&pid].uncertainty;
+        let points0 = league.draft.as_ref().unwrap().scout_points;
+        league.scout_prospect(pid);
+        let u1 = league.draft.as_ref().unwrap().scouting[&pid].uncertainty;
+        let points1 = league.draft.as_ref().unwrap().scout_points;
+        assert!(u1 < u0, "scouting should reduce uncertainty");
+        assert_eq!(points1, points0 - 1, "scouting costs a point");
     }
 
     #[test]

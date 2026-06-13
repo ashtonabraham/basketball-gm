@@ -60,6 +60,10 @@ pub struct Player {
     pub age: u8,
     pub position: Position,
     pub ratings: Ratings,
+    /// True peak overall this player can reach (the development ceiling). This
+    /// is the exact value shown on rosters; for undrafted prospects it is
+    /// hidden behind a scouted letter grade.
+    pub potential: u8,
     /// `None` for free agents / undrafted prospects.
     pub team: Option<TeamId>,
 }
@@ -67,6 +71,11 @@ pub struct Player {
 impl Player {
     pub fn overall(&self) -> u8 {
         self.ratings.overall()
+    }
+
+    /// Whether the player still has untapped upside.
+    pub fn has_upside(&self) -> bool {
+        self.potential > self.overall()
     }
 }
 
