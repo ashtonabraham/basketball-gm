@@ -17,7 +17,7 @@ pub mod teams_data;
 pub mod types;
 
 pub use draft::{grade_for, Draft, DraftPick, ScoutEntry};
-pub use league::{League, Phase, PlayoffOutcome, SeasonHistory, SeasonRecap};
+pub use league::{Awards, League, OwnerMessage, OwnerTone, Phase, PlayoffOutcome, SeasonHistory, SeasonRecap};
 pub use player::{Player, Ratings, SeasonStats};
 pub use playoffs::{Playoffs, Series, ROUND_NAMES};
 pub use schedule::{Game, GameResult};
@@ -72,6 +72,33 @@ mod integration_tests {
         league.finish_season();
         assert_eq!(league.phase, Phase::Offseason);
         assert_eq!(league.history.len(), 1);
+    }
+
+    #[test]
+    fn awards_finals_mvp_and_owner_message() {
+        let mut league = League::new(21);
+        league.select_team(0);
+        league.sim_to_end_of_season();
+        league.start_playoffs();
+        league.playoff_sim_all();
+
+        // Finals MVP belongs to the champion and posted Finals stats.
+        let po = league.playoffs.as_ref().unwrap();
+        let champ = po.champion.unwrap();
+        let mvp = po.finals_mvp.expect("finals mvp set");
+        let champ_team = league.teams.iter().find(|t| t.id == champ).unwrap();
+        assert!(champ_team.roster.contains(&mvp));
+        assert!(league.finals_stats[mvp as usize].gp > 0);
+
+        league.finish_season();
+        let awards = league.awards.as_ref().unwrap();
+        assert!(awards.mvp.is_some());
+        assert!(awards.dpoy.is_some());
+
+        // First three seasons: the owner withholds judgment.
+        let owner = league.owner_message.as_ref().unwrap();
+        assert_eq!(owner.tone, OwnerTone::TooEarly);
+        assert!(!owner.body.is_empty());
     }
 
     #[test]

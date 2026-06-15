@@ -53,6 +53,8 @@ impl Series {
 pub struct Playoffs {
     pub rounds: Vec<Vec<Series>>,
     pub champion: Option<TeamId>,
+    /// Set when the champion is crowned: the best performer in the Finals.
+    pub finals_mvp: Option<crate::types::PlayerId>,
 }
 
 pub const ROUND_NAMES: [&str; 4] = [

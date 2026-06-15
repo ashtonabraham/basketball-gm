@@ -90,6 +90,30 @@ fn develop_player(p: &mut Player, rng: &mut impl Rng) {
     }
 }
 
+/// End-of-season individual awards (winners by player id).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Awards {
+    pub mvp: Option<PlayerId>,
+    pub dpoy: Option<PlayerId>,
+    pub roy: Option<PlayerId>,
+}
+
+/// How the owner felt about the season.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OwnerTone {
+    TooEarly,
+    Pleased,
+    Neutral,
+    Displeased,
+}
+
+/// The owner's after-season note to the GM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnerMessage {
+    pub tone: OwnerTone,
+    pub body: String,
+}
+
 /// Add one game's box score into the running season totals (indexed by id).
 fn accumulate_stats(stats: &mut [SeasonStats], tb: &TeamBox) {
     for l in &tb.lines {
@@ -170,8 +194,14 @@ pub struct League {
     pub history: Vec<SeasonHistory>,
     /// Accumulated regular-season stats, indexed by player id.
     pub season_stats: Vec<SeasonStats>,
+    /// Accumulated Finals-only stats (for Finals MVP), indexed by player id.
+    pub finals_stats: Vec<SeasonStats>,
     /// The draft, while one is running.
     pub draft: Option<Draft>,
+    /// Awards from the most recently completed season.
+    pub awards: Option<Awards>,
+    /// The owner's message after the most recently completed season.
+    pub owner_message: Option<OwnerMessage>,
     seed: u64,
     next_player_id: PlayerId,
 }
@@ -190,7 +220,10 @@ impl League {
             playoffs: None,
             history: Vec::new(),
             season_stats: Vec::new(),
+            finals_stats: Vec::new(),
             draft: None,
+            awards: None,
+            owner_message: None,
             seed,
             next_player_id: 0,
         };
@@ -301,7 +334,7 @@ impl League {
         let age = rng.gen_range(19..=38);
         let ratings = gen_ratings(pos, talent, rng);
         let potential = gen_potential(ratings.overall(), age, rng);
-        Player { id, name, age, position: pos, ratings, potential, team: Some(team_id) }
+        Player { id, name, age, position: pos, ratings, potential, team: Some(team_id), draft_season: None }
     }
 
     // ---- Regular season ----
@@ -406,8 +439,33 @@ impl League {
         for (h, l) in first_round_pairs(&east).into_iter().chain(first_round_pairs(&west)) {
             round0.push(Series::new(h, l));
         }
-        self.playoffs = Some(Playoffs { rounds: vec![round0], champion: None });
+        self.playoffs = Some(Playoffs { rounds: vec![round0], champion: None, finals_mvp: None });
+        self.finals_stats = vec![SeasonStats::default(); self.players.len()];
         self.phase = Phase::Playoffs;
+    }
+
+    /// Is the current (deepest) round the Finals?
+    fn in_finals(&self) -> bool {
+        self.playoffs.as_ref().map(|p| p.rounds.len() == 4).unwrap_or(false)
+    }
+
+    /// Among the champion's roster, the best Finals performer.
+    fn compute_finals_mvp(&self, champion: TeamId) -> Option<PlayerId> {
+        self.teams
+            .iter()
+            .find(|t| t.id == champion)?
+            .roster
+            .iter()
+            .filter_map(|pid| {
+                let s = self.finals_stats.get(*pid as usize)?;
+                if s.gp == 0 {
+                    return None;
+                }
+                let score = s.pts as f64 + s.reb() as f64 * 0.7 + s.ast as f64 * 0.7;
+                Some((*pid, score))
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .map(|(pid, _)| pid)
     }
 
     pub fn playoffs_complete(&self) -> bool {
@@ -435,6 +493,16 @@ impl League {
             .last()
             .map(|r| r.iter().any(|s| !s.is_decided() && s.has_team(uid)))
             .unwrap_or(false)
+    }
+
+    /// Crown the Finals winner and pick the Finals MVP.
+    fn crown_champion(&mut self) {
+        let champ = self.playoffs.as_ref().and_then(|p| p.rounds[3][0].winner());
+        let mvp = champ.and_then(|c| self.compute_finals_mvp(c));
+        if let Some(po) = self.playoffs.as_mut() {
+            po.champion = champ;
+            po.finals_mvp = mvp;
+        }
     }
 
     /// Build the next round's pairings from the current round's winners.
@@ -468,10 +536,17 @@ impl League {
                 (s.low, s.high)
             }
         };
+        let is_finals = self.in_finals();
         let home = self.teams.iter().find(|t| t.id == home_id).unwrap();
         let away = self.teams.iter().find(|t| t.id == away_id).unwrap();
         let g = simulate_game(home, away, &self.players, rng);
         let res = GameResult { home_score: g.home.score, away_score: g.away.score };
+
+        // Finals games feed the Finals MVP race.
+        if is_finals {
+            accumulate_stats(&mut self.finals_stats, &g.home);
+            accumulate_stats(&mut self.finals_stats, &g.away);
+        }
 
         // Record the result.
         let po = self.playoffs.as_mut().unwrap();
@@ -498,8 +573,7 @@ impl League {
             let last_idx = self.playoffs.as_ref().unwrap().rounds.len() - 1;
             if last_idx >= 3 {
                 // Finals decided — crown the champion.
-                let champ = self.playoffs.as_ref().unwrap().rounds[3][0].winner();
-                self.playoffs.as_mut().unwrap().champion = champ;
+                self.crown_champion();
                 return false;
             }
             self.build_next_round();
@@ -520,8 +594,7 @@ impl League {
         if self.current_round_decided() {
             let last_idx = self.playoffs.as_ref().unwrap().rounds.len() - 1;
             if last_idx >= 3 {
-                let champ = self.playoffs.as_ref().unwrap().rounds[3][0].winner();
-                self.playoffs.as_mut().unwrap().champion = champ;
+                self.crown_champion();
             }
         }
         true
@@ -638,8 +711,215 @@ impl League {
         })
     }
 
+    // ---- Awards & the owner ----
+
+    /// A simple production value (per game) for awards.
+    fn award_value(s: &SeasonStats) -> f64 {
+        let stl = s.stl as f64 / s.gp.max(1) as f64;
+        let blk = s.blk as f64 / s.gp.max(1) as f64;
+        s.ppg() + s.rpg() * 1.2 + s.apg() * 1.5 + (stl + blk) * 2.0
+    }
+
+    /// Compute MVP, Defensive Player of the Year, and Rookie of the Year.
+    pub fn compute_awards(&self) -> Awards {
+        let team_winpct = |pid: PlayerId| -> f64 {
+            self.players
+                .iter()
+                .find(|p| p.id == pid)
+                .and_then(|p| p.team)
+                .and_then(|tid| self.teams.iter().find(|t| t.id == tid))
+                .map(|t| t.win_pct())
+                .unwrap_or(0.0)
+        };
+
+        // MVP: production weighted by team success (min 30 games).
+        let mvp = self
+            .players
+            .iter()
+            .filter(|p| self.season_stats[p.id as usize].gp >= 30)
+            .map(|p| (p.id, Self::award_value(&self.season_stats[p.id as usize]) + team_winpct(p.id) * 12.0))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .map(|(id, _)| id);
+
+        // DPOY: defense-heavy score.
+        let dpoy = self
+            .players
+            .iter()
+            .filter(|p| self.season_stats[p.id as usize].gp >= 30)
+            .map(|p| {
+                let s = &self.season_stats[p.id as usize];
+                let stl = s.stl as f64 / s.gp.max(1) as f64;
+                let blk = s.blk as f64 / s.gp.max(1) as f64;
+                let score = stl * 3.0 + blk * 3.0 + s.rpg() * 0.7 + p.ratings.defense as f64 * 0.15;
+                (p.id, score)
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .map(|(id, _)| id);
+
+        // ROY: best rookie (drafted last offseason), min 20 games.
+        let rookie_class = self.season.checked_sub(1);
+        let roy = self
+            .players
+            .iter()
+            .filter(|p| p.draft_season == rookie_class && self.season_stats[p.id as usize].gp >= 20)
+            .map(|p| (p.id, Self::award_value(&self.season_stats[p.id as usize])))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .map(|(id, _)| id);
+
+        Awards { mvp, dpoy, roy }
+    }
+
+    /// League-average points per team game.
+    fn league_ppg(&self) -> f64 {
+        let played: Vec<&crate::schedule::Game> = self.schedule.iter().filter(|g| g.is_played()).collect();
+        if played.is_empty() {
+            return 110.0;
+        }
+        let total: u32 = played.iter().filter_map(|g| g.result).map(|r| r.home_score + r.away_score).sum();
+        total as f64 / (played.len() as f64 * 2.0)
+    }
+
+    /// A team's points scored / allowed per game.
+    fn team_points(&self, tid: TeamId) -> (f64, f64) {
+        let mut pf = 0u32;
+        let mut pa = 0u32;
+        let mut n = 0u32;
+        for g in self.schedule.iter().filter(|g| g.is_played()) {
+            let Some(r) = g.result else { continue };
+            if g.home == tid {
+                pf += r.home_score;
+                pa += r.away_score;
+                n += 1;
+            } else if g.away == tid {
+                pf += r.away_score;
+                pa += r.home_score;
+                n += 1;
+            }
+        }
+        if n == 0 {
+            (0.0, 0.0)
+        } else {
+            (pf as f64 / n as f64, pa as f64 / n as f64)
+        }
+    }
+
+    fn team_three_pct(&self, tid: TeamId) -> f64 {
+        let Some(team) = self.teams.iter().find(|t| t.id == tid) else { return 0.0 };
+        let (mut m, mut a) = (0u32, 0u32);
+        for pid in &team.roster {
+            let s = &self.season_stats[*pid as usize];
+            m += s.tpm;
+            a += s.tpa;
+        }
+        if a == 0 { 0.0 } else { m as f64 / a as f64 }
+    }
+
+    /// The single thing the owner wants improved, or `None` if nothing glaring.
+    fn owner_goal(&self, uid: TeamId) -> Option<String> {
+        let outcome = self.outcome_for(uid);
+        if matches!(outcome, PlayoffOutcome::MissedPlayoffs) {
+            return Some("get this team into the playoffs".into());
+        }
+        let (pf, pa) = self.team_points(uid);
+        let lppg = self.league_ppg();
+        if pa - lppg > 3.0 {
+            return Some("tighten up the defense — we give up too many points".into());
+        }
+        if lppg - pf > 3.0 {
+            return Some("find a way to put more points on the board".into());
+        }
+        if self.team_three_pct(uid) < 0.34 {
+            return Some("get more shooting into this lineup".into());
+        }
+        match outcome {
+            PlayoffOutcome::LostInRound(0) => Some("get out of the first round next year".into()),
+            PlayoffOutcome::LostInRound(1) => Some("reach the conference finals".into()),
+            PlayoffOutcome::LostInRound(2) => Some("break through to the Finals".into()),
+            PlayoffOutcome::LostInRound(3) => Some("we were right there — finish the job and win it all".into()),
+            _ => None,
+        }
+    }
+
+    /// Build the owner's after-season message for the user's team.
+    pub fn evaluate_owner(&self) -> OwnerMessage {
+        let Some(uid) = self.user_team_id else {
+            return OwnerMessage { tone: OwnerTone::Neutral, body: String::new() };
+        };
+        let team = self.teams.iter().find(|t| t.id == uid).unwrap();
+        let city = team.location.clone();
+        let champ = self.playoffs.as_ref().and_then(|p| p.champion);
+
+        // Hands-off while you build (first three seasons).
+        if self.season <= 3 {
+            return OwnerMessage {
+                tone: OwnerTone::TooEarly,
+                body: format!(
+                    "It's only year {}. I'm not going to judge you yet — take your time and build me something special.",
+                    self.season
+                ),
+            };
+        }
+
+        // A title earns the warmest words.
+        if champ == Some(uid) {
+            return OwnerMessage {
+                tone: OwnerTone::Pleased,
+                body: format!("You brought a championship home to {city}! I knew I hired the right person. Keep it up, my son."),
+            };
+        }
+
+        // Roster-based expectation vs reality.
+        let league_avg: f64 = self.teams.iter().map(|t| t.strength(&self.players)).sum::<f64>() / self.teams.len() as f64;
+        let my_strength = team.strength(&self.players);
+        let exp_pct = (0.5 + (my_strength - league_avg) * 0.02).clamp(0.18, 0.82);
+        let expected_wins = (exp_pct * 82.0).round() as i32;
+        let win_diff = team.wins as i32 - expected_wins;
+        let made_playoffs = !matches!(self.outcome_for(uid), PlayoffOutcome::MissedPlayoffs);
+        let deep_run = matches!(self.outcome_for(uid), PlayoffOutcome::LostInRound(2) | PlayoffOutcome::LostInRound(3));
+
+        let goal = self.owner_goal(uid);
+
+        let tone = if !made_playoffs || win_diff <= -7 {
+            OwnerTone::Displeased
+        } else if win_diff >= 5 || deep_run {
+            OwnerTone::Pleased
+        } else {
+            OwnerTone::Neutral
+        };
+
+        let record = format!("{}-{}", team.wins, team.losses);
+        let body = match (tone, goal) {
+            (OwnerTone::Pleased, None) => {
+                format!("Hell of a year — {record} and you had us believing. Keep it up, my son.")
+            }
+            (OwnerTone::Pleased, Some(g)) => {
+                format!("Strong season at {record}. I liked what I saw. One thing for next year: {g}.")
+            }
+            (OwnerTone::Neutral, Some(g)) => {
+                format!("A {record} season — respectable, nothing to hang our heads about. But next year, I want you to {g}.")
+            }
+            (OwnerTone::Neutral, None) => {
+                format!("A solid {record} campaign. Keep it up, my son.")
+            }
+            (OwnerTone::Displeased, Some(g)) => {
+                format!("I'll be straight with you — I expected more than {record}. Next season, {g}, or you and I are going to have a problem.")
+            }
+            (OwnerTone::Displeased, None) => {
+                format!("{record} is not what I'm paying for. I expect better next year.")
+            }
+            (OwnerTone::TooEarly, _) => unreachable!(),
+        };
+
+        OwnerMessage { tone, body }
+    }
+
     /// Record the finished season into history and move to the offseason.
     pub fn finish_season(&mut self) {
+        // Awards and the owner's note use this season's data; evaluate before
+        // pushing history so the owner can compare to last year.
+        self.awards = Some(self.compute_awards());
+        self.owner_message = Some(self.evaluate_owner());
+
         let champion_id = self.playoffs.as_ref().and_then(|p| p.champion);
         if let (Some(uid), Some(cid)) = (self.user_team_id, champion_id) {
             let user = self.teams.iter().find(|t| t.id == uid);
@@ -693,6 +973,7 @@ impl League {
                 ratings,
                 potential,
                 team: None,
+                draft_season: None,
             });
             prospects.push(id);
         }
@@ -741,6 +1022,10 @@ impl League {
             StdRng::seed_from_u64(self.seed ^ 0x5C0_u64 ^ (pid as u64) ^ ((remaining as u64) << 8));
         if let Some(d) = self.draft.as_mut() {
             let Some(entry) = d.scouting.get_mut(&pid) else { return };
+            // Already fully scouted — don't waste a point.
+            if entry.confidence() >= 3 {
+                return;
+            }
             entry.uncertainty *= 0.55;
             let noise = (rng.gen::<f64>() + rng.gen::<f64>() - 1.0) * entry.uncertainty;
             entry.estimate = (pot + noise).clamp(30.0, 99.0);
@@ -808,8 +1093,10 @@ impl League {
             d.prospects.retain(|p| *p != player_id);
             d.on_clock += 1;
         }
+        let season = self.season;
         if let Some(p) = self.players.iter_mut().find(|p| p.id == player_id) {
             p.team = Some(team_id);
+            p.draft_season = Some(season);
         }
         if let Some(t) = self.teams.iter_mut().find(|t| t.id == team_id) {
             t.roster.push(player_id);

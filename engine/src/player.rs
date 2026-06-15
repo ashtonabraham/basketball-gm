@@ -66,6 +66,9 @@ pub struct Player {
     pub potential: u8,
     /// `None` for free agents / undrafted prospects.
     pub team: Option<TeamId>,
+    /// The season in which this player was drafted (used to identify rookies).
+    /// `None` for the initial league population.
+    pub draft_season: Option<u32>,
 }
 
 impl Player {
