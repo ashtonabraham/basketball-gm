@@ -184,7 +184,7 @@ fn ProspectBoard() -> impl IntoView {
                                     <td>{pas}</td><td>{hdl}</td>
                                     <td>{reb}</td><td>{def}</td><td>{ath}</td>
                                     <td class="prospect-actions">
-                                        <Show when=move || can_scout>
+                                        <Show when=move || can_scout && conf < 3>
                                             <button class="mini-btn" title="Spend a scouting point" on:click=move |_| scout(id)>"Scout"</button>
                                         </Show>
                                         <Show when=move || can_pick>

@@ -28,9 +28,54 @@ pub fn Dashboard() -> impl IntoView {
                     }}
                 </div>
             </main>
+            <Show when=move || state.league.with(|l| l.phase == Phase::Playoffs && l.playoffs_complete())>
+                <ChampionPopup/>
+            </Show>
             <Show when=move || state.league.with(|l| l.phase == Phase::Offseason)>
                 <RecapOverlay/>
             </Show>
+        </div>
+    }
+}
+
+#[component]
+fn ChampionPopup() -> impl IntoView {
+    let state = expect_context::<AppState>();
+
+    let champ = move || state.league.with(|l| {
+        l.playoffs.as_ref().and_then(|p| p.champion)
+            .and_then(|id| l.teams.iter().find(|t| t.id == id))
+            .map(|t| (t.full_name(), t.primary.hex().to_string(), t.secondary.hex().to_string()))
+    });
+    let fmvp = move || state.league.with(|l| {
+        let po = l.playoffs.as_ref()?;
+        let pid = po.finals_mvp?;
+        let p = l.players.iter().find(|p| p.id == pid)?;
+        let s = &l.finals_stats[pid as usize];
+        Some((p.name.clone(), s.ppg(), s.rpg(), s.apg()))
+    });
+
+    // Continue → finalize the season (computes awards + owner message).
+    let cont = move |_| state.update_league(|l| l.finish_season());
+
+    view! {
+        <div class="overlay">
+            <div class="champ-popup">
+                <div class="trophy">"\u{1f3c6}"</div>
+                {move || champ().map(|(name, c1, c2)| view! {
+                    <div class="champ-logo" style=format!("--c1:{};--c2:{}", c1, c2)></div>
+                    <h2 class="champ-name">{name}</h2>
+                })}
+                <div class="champ-sub">"are your champions"</div>
+                {move || fmvp().map(|(name, ppg, rpg, apg)| view! {
+                    <div class="fmvp">
+                        <div class="fmvp-label">"Finals MVP"</div>
+                        <div class="fmvp-name">{name}</div>
+                        <div class="fmvp-line">{format!("{:.1} pts \u{2022} {:.1} reb \u{2022} {:.1} ast", ppg, rpg, apg)}</div>
+                    </div>
+                })}
+                <button class="btn btn-primary big" on:click=cont>"Continue \u{2192}"</button>
+            </div>
         </div>
     }
 }
@@ -144,9 +189,7 @@ fn TopBar() -> impl IntoView {
 
     // Playoff stepping.
     let po_complete = move || state.league.with(|l| l.playoffs_complete());
-    let user_alive = move || state.league.with(|l| l.user_still_in_playoffs());
     let sim_game = move |_| state.update_league(|l| { l.playoff_sim_gameday(); });
-    let sim_to_my = move |_| state.update_league(|l| l.playoff_sim_to_user_game());
     let sim_round = move |_| state.update_league(|l| l.playoff_sim_round());
     let sim_po_all = move |_| state.update_league(|l| l.playoff_sim_all());
 
@@ -176,9 +219,6 @@ fn TopBar() -> impl IntoView {
                         } else {
                             view! {
                                 <button class="btn btn-primary" on:click=sim_game>"Sim Game"</button>
-                                <Show when=user_alive>
-                                    <button class="btn" on:click=sim_to_my>"Sim to My Game"</button>
-                                </Show>
                                 <button class="btn" on:click=sim_round>"Sim Round"</button>
                                 <button class="btn" on:click=sim_po_all>"Sim Playoffs"</button>
                             }.into_any()
@@ -356,14 +396,19 @@ fn PlayoffsPanel() -> impl IntoView {
     let state = expect_context::<AppState>();
     let has_po = move || state.league.with(|l| l.playoffs.is_some());
 
+    // Each series carries both teams' badge (abbrev + colors) and series score.
     let rounds = move || {
         state.league.with(|l| {
+            let badge = |id: u32| {
+                l.teams.iter().find(|t| t.id == id).map(|t| {
+                    (t.abbrev.clone(), t.primary.hex().to_string(), t.secondary.hex().to_string())
+                }).unwrap_or_default()
+            };
             let Some(po) = &l.playoffs else { return Vec::new() };
-            let name = |id: u32| l.teams.iter().find(|t| t.id == id).map(|t| t.abbrev.clone()).unwrap_or_default();
             po.rounds.iter().enumerate().map(|(ri, round)| {
                 let series = round.iter().map(|s| {
                     let winner = s.winner();
-                    (name(s.high), s.high_wins, name(s.low), s.low_wins,
+                    (badge(s.high), s.high_wins, badge(s.low), s.low_wins,
                      winner == Some(s.high), winner == Some(s.low))
                 }).collect::<Vec<_>>();
                 (ROUND_NAMES.get(ri).copied().unwrap_or(""), series)
@@ -389,14 +434,18 @@ fn PlayoffsPanel() -> impl IntoView {
                         view! {
                             <div class="bracket-round">
                                 <h4 class="round-name">{rname}</h4>
-                                {series.into_iter().map(|(hi, hw, lo, lw, hi_won, lo_won)| {
+                                {series.into_iter().map(|((ha, hc1, hc2), hw, (la, lc1, lc2), lw, hi_won, lo_won)| {
                                     view! {
                                         <div class="series">
-                                            <div class=move || if hi_won { "seed-line won" } else { "seed-line" }>
-                                                <span>{hi.clone()}</span><span class="wins">{hw}</span>
+                                            <div class=if hi_won { "seed-line won" } else { "seed-line" }>
+                                                <span class="mini-logo" style=format!("--c1:{};--c2:{}", hc1, hc2)>{ha.clone()}</span>
+                                                <span class="seed-name">{ha}</span>
+                                                <span class="wins">{hw}</span>
                                             </div>
-                                            <div class=move || if lo_won { "seed-line won" } else { "seed-line" }>
-                                                <span>{lo.clone()}</span><span class="wins">{lw}</span>
+                                            <div class=if lo_won { "seed-line won" } else { "seed-line" }>
+                                                <span class="mini-logo" style=format!("--c1:{};--c2:{}", lc1, lc2)>{la.clone()}</span>
+                                                <span class="seed-name">{la}</span>
+                                                <span class="wins">{lw}</span>
                                             </div>
                                         </div>
                                     }
@@ -595,6 +644,26 @@ fn RecapOverlay() -> impl IntoView {
     let state = expect_context::<AppState>();
     let recap = move || state.league.with(|l| l.season_recap());
 
+    // Owner's note, styled by tone.
+    let owner = move || state.league.with(|l| l.owner_message.clone());
+    let owner_class = move || {
+        state.league.with(|l| match l.owner_message.as_ref().map(|m| m.tone) {
+            Some(engine::OwnerTone::Pleased) => "owner pleased",
+            Some(engine::OwnerTone::Displeased) => "owner displeased",
+            Some(engine::OwnerTone::TooEarly) => "owner early",
+            _ => "owner",
+        })
+    };
+
+    // Resolve award winners to names.
+    let award_name = move |pick: fn(&engine::Awards) -> Option<u32>| {
+        state.league.with(|l| {
+            l.awards.as_ref().and_then(pick).and_then(|id| {
+                l.players.iter().find(|p| p.id == id).map(|p| format!("{} ({} OVR)", p.name, p.overall()))
+            })
+        })
+    };
+
     let to_draft = move |_| state.update_league(|l| l.enter_draft());
 
     view! {
@@ -611,11 +680,28 @@ fn RecapOverlay() -> impl IntoView {
                             <div class="stat"><div class="stat-num">{seed}</div><div class="stat-lbl">"Conference"</div></div>
                             <div class="stat"><div class="stat-num">{outcome}</div><div class="stat-lbl">"Postseason"</div></div>
                         </div>
-                        <div class="recap-line">"League Champion: "<b>{r.champion_name}</b></div>
-                        <div class="recap-line">"Team MVP: "<b>{r.best_player}</b>" ("{r.best_player_ovr}" OVR)"</div>
-                        <button class="btn btn-primary big" on:click=to_draft>"Continue to Draft \u{2192}"</button>
                     }
                 })}
+
+                // Message from the owner.
+                {move || owner().map(|m| view! {
+                    <div class=owner_class()>
+                        <div class="owner-label">"\u{1f4e9} A message from the owner"</div>
+                        <div class="owner-body">"\u{201c}"{m.body}"\u{201d}"</div>
+                    </div>
+                })}
+
+                // Awards.
+                <div class="awards">
+                    <div class="award"><span class="award-lbl">"MVP"</span><span class="award-name">{move || award_name(|a| a.mvp).unwrap_or_else(|| "\u{2014}".into())}</span></div>
+                    <div class="award"><span class="award-lbl">"Defensive POY"</span><span class="award-name">{move || award_name(|a| a.dpoy).unwrap_or_else(|| "\u{2014}".into())}</span></div>
+                    <div class="award"><span class="award-lbl">"Rookie of the Year"</span><span class="award-name">{move || award_name(|a| a.roy).unwrap_or_else(|| "\u{2014}".into())}</span></div>
+                </div>
+
+                {move || recap().map(|r| view! {
+                    <div class="recap-line">"League Champion: "<b>{r.champion_name}</b></div>
+                })}
+                <button class="btn btn-primary big" on:click=to_draft>"Continue to Draft \u{2192}"</button>
             </div>
         </div>
     }
