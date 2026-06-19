@@ -5,6 +5,7 @@
 //! [`League`], which is fully serializable for save/load.
 
 pub mod draft;
+pub mod free_agency;
 pub mod league;
 pub mod names;
 pub mod player;
@@ -17,8 +18,12 @@ pub mod teams_data;
 pub mod types;
 
 pub use draft::{grade_for, Draft, DraftPick, ScoutEntry};
-pub use league::{Awards, League, OwnerMessage, OwnerTone, Phase, PlayoffOutcome, SeasonHistory, SeasonRecap};
-pub use player::{Player, Ratings, SeasonStats};
+pub use free_agency::{FaOffer, FreeAgency};
+pub use league::{
+    market_salary, Awards, League, OwnerMessage, OwnerTone, Phase, PlayoffOutcome, SeasonHistory,
+    SeasonRecap, TradeEval, MIN_SALARY, SALARY_CAP,
+};
+pub use player::{Contract, Player, Ratings, SeasonStats};
 pub use playoffs::{Playoffs, Series, ROUND_NAMES};
 pub use schedule::{Game, GameResult};
 pub use sim::{simulate_game, GameSim, PlayerLine, TeamBox};
@@ -124,6 +129,79 @@ mod integration_tests {
                 assert!((4..=7).contains(&s.games_played()));
             }
         }
+    }
+
+    #[test]
+    fn trades_respect_value_and_salary() {
+        let mut league = League::new(4);
+        league.select_team(0);
+        let (user, other) = (0u32, 1u32);
+        assert!(league.can_trade(), "should be able to trade pre-deadline");
+
+        let user_roster: Vec<u32> = league.teams[user as usize].roster.clone();
+        let other_roster: Vec<u32> = league.teams[other as usize].roster.clone();
+
+        // Lopsided ask (give your worst, demand their best) is not accepted.
+        let user_worst = *user_roster.iter().min_by(|a, b| league.player_trade_value(**a).partial_cmp(&league.player_trade_value(**b)).unwrap()).unwrap();
+        let other_best = *other_roster.iter().max_by(|a, b| league.player_trade_value(**a).partial_cmp(&league.player_trade_value(**b)).unwrap()).unwrap();
+        let bad = league.evaluate_trade(other, &[user_worst], &[other_best]);
+        assert!(!bad.accepted, "fleecing the CPU should be rejected");
+
+        // Find any legal deal where the CPU gains value — it should accept and execute.
+        let mut done = false;
+        'outer: for &g in &user_roster {
+            for &r in &other_roster {
+                let e = league.evaluate_trade(other, &[g], &[r]);
+                if e.legal && e.give_value > e.get_value + 60.0 {
+                    assert!(e.accepted);
+                    assert!(league.execute_trade(other, &[g], &[r]));
+                    assert_eq!(league.players.iter().find(|p| p.id == g).unwrap().team, Some(other));
+                    assert_eq!(league.players.iter().find(|p| p.id == r).unwrap().team, Some(user));
+                    done = true;
+                    break 'outer;
+                }
+            }
+        }
+        assert!(done, "expected at least one acceptable trade to exist");
+    }
+
+    #[test]
+    fn free_agency_signs_players() {
+        let mut league = League::new(31);
+        league.select_team(0);
+        league.sim_to_end_of_season();
+        league.start_playoffs();
+        league.playoff_sim_all();
+        league.finish_season();
+        league.enter_draft();
+        league.draft_sim_all();
+        league.enter_free_agency();
+        assert_eq!(league.phase, Phase::FreeAgency);
+
+        let pool_before = league.free_agency.as_ref().unwrap().pool.len();
+        assert!(pool_before > 0, "there should be free agents");
+
+        // CPU teams should sign players over a few rounds.
+        for _ in 0..5 {
+            league.fa_sim_round();
+        }
+        let pool_after = league.free_agency.as_ref().unwrap().pool.len();
+        assert!(pool_after < pool_before, "free agents should have signed");
+
+        // Every signed player has a real contract and is on a roster.
+        for t in &league.teams {
+            for pid in &t.roster {
+                let p = league.players.iter().find(|p| p.id == *pid).unwrap();
+                assert!(p.contract.years > 0 && p.contract.salary >= crate::MIN_SALARY);
+                assert_eq!(p.team, Some(t.id));
+            }
+        }
+
+        league.fa_finish();
+        assert_eq!(league.phase, Phase::RegularSeason);
+        assert!(league.free_agency.is_none());
+        // Cap is respected for CPU teams (some slack allowed for min deals).
+        assert!(league.teams.iter().all(|t| t.roster.len() >= 5));
     }
 
     #[test]

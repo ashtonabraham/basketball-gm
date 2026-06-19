@@ -52,6 +52,28 @@ impl Ratings {
     }
 }
 
+/// A player's contract. Salary is in thousands of dollars per year (so 28000
+/// means $28.0M). `years` counts seasons remaining, including the upcoming one;
+/// 0 means the player is a free agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Contract {
+    pub salary: u32,
+    pub years: u8,
+}
+
+impl Contract {
+    pub fn free_agent() -> Self {
+        Contract { salary: 0, years: 0 }
+    }
+    pub fn is_expired(&self) -> bool {
+        self.years == 0
+    }
+    /// Salary formatted like "$28.0M".
+    pub fn salary_str(&self) -> String {
+        format!("${:.1}M", self.salary as f64 / 1000.0)
+    }
+}
+
 /// A player.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Player {
@@ -69,6 +91,8 @@ pub struct Player {
     /// The season in which this player was drafted (used to identify rookies).
     /// `None` for the initial league population.
     pub draft_season: Option<u32>,
+    /// Current contract (salary + years remaining).
+    pub contract: Contract,
 }
 
 impl Player {

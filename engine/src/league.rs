@@ -4,8 +4,9 @@
 //! the web layer can save/load it to the browser's localStorage as JSON.
 
 use crate::draft::{Draft, DraftPick, ScoutEntry};
+use crate::free_agency::{FaOffer, FreeAgency};
 use crate::names::{FIRST_NAMES, LAST_NAMES};
-use crate::player::{Player, Ratings, SeasonStats};
+use crate::player::{Contract, Player, Ratings, SeasonStats};
 use crate::playoffs::{first_round_pairs, high_seed_hosts, Playoffs, Series};
 use crate::schedule::{generate_schedule, Game, GameResult};
 use crate::sim::{simulate_game, TeamBox};
@@ -43,6 +44,33 @@ fn gen_ratings(pos: Position, talent: f64, rng: &mut impl Rng) -> Ratings {
         defense: attr(m.6, rng),
         athleticism: attr(m.7, rng),
     }
+}
+
+/// The league salary cap, in thousands of dollars ($140.0M).
+pub const SALARY_CAP: u32 = 140_000;
+/// Minimum salary, in thousands ($1.2M).
+pub const MIN_SALARY: u32 = 1_200;
+
+/// A fair-market yearly salary (thousands) for a player of the given overall.
+/// This is what the player is "worth" — used for generated contracts, free
+/// agency demands, and trade-value math.
+pub fn market_salary(ovr: u8) -> u32 {
+    // Smooth, steep-at-the-top curve. ~45M for a 90, ~12M for a 70, min ~1.2M.
+    let o = ovr as f64;
+    let raw = if o >= 70.0 {
+        12_000.0 + (o - 70.0) * 1_700.0
+    } else {
+        1_200.0 + (o - 50.0).max(0.0) * 540.0
+    };
+    (raw.round() as u32).clamp(MIN_SALARY, 48_000)
+}
+
+/// Rookie-scale salary (thousands) for a given overall draft pick number.
+fn rookie_scale(pick: u8) -> u32 {
+    // ~$9.5M for #1 down to the minimum by the end of the draft.
+    let top = 9_500.0;
+    let v = top - (pick as f64 - 1.0) * 130.0;
+    (v.round() as u32).clamp(MIN_SALARY, 9_500)
 }
 
 /// A player's peak-overall ceiling: current overall plus age-dependent upside.
@@ -114,6 +142,20 @@ pub struct OwnerMessage {
     pub body: String,
 }
 
+/// The result of evaluating a proposed trade (for previewing in the UI).
+#[derive(Debug, Clone)]
+pub struct TradeEval {
+    /// Salary-cap and roster legal.
+    pub legal: bool,
+    /// The CPU would accept it.
+    pub accepted: bool,
+    pub give_salary: u32,
+    pub get_salary: u32,
+    pub give_value: f64,
+    pub get_value: f64,
+    pub message: String,
+}
+
 /// Add one game's box score into the running season totals (indexed by id).
 fn accumulate_stats(stats: &mut [SeasonStats], tb: &TeamBox) {
     for l in &tb.lines {
@@ -147,6 +189,8 @@ pub enum Phase {
     Offseason,
     /// The annual draft is running.
     Draft,
+    /// The offseason free-agency period is running.
+    FreeAgency,
 }
 
 /// How a team's season ended, for the recap.
@@ -198,6 +242,8 @@ pub struct League {
     pub finals_stats: Vec<SeasonStats>,
     /// The draft, while one is running.
     pub draft: Option<Draft>,
+    /// Free agency, while it is running.
+    pub free_agency: Option<FreeAgency>,
     /// Awards from the most recently completed season.
     pub awards: Option<Awards>,
     /// The owner's message after the most recently completed season.
@@ -222,6 +268,7 @@ impl League {
             season_stats: Vec::new(),
             finals_stats: Vec::new(),
             draft: None,
+            free_agency: None,
             awards: None,
             owner_message: None,
             seed,
@@ -334,7 +381,10 @@ impl League {
         let age = rng.gen_range(19..=38);
         let ratings = gen_ratings(pos, talent, rng);
         let potential = gen_potential(ratings.overall(), age, rng);
-        Player { id, name, age, position: pos, ratings, potential, team: Some(team_id), draft_season: None }
+        // Initial contracts: market value with a little spread, 1–4 years left.
+        let salary = (market_salary(ratings.overall()) as f64 * rng.gen_range(0.85..1.15)).round() as u32;
+        let contract = Contract { salary: salary.clamp(MIN_SALARY, 48_000), years: rng.gen_range(1..=4) };
+        Player { id, name, age, position: pos, ratings, potential, team: Some(team_id), draft_season: None, contract }
     }
 
     // ---- Regular season ----
@@ -675,6 +725,46 @@ impl League {
             .unwrap_or_default()
     }
 
+    /// Total payroll (thousands) for a team: the sum of its roster's salaries.
+    pub fn team_payroll(&self, tid: TeamId) -> u32 {
+        let Some(team) = self.teams.iter().find(|t| t.id == tid) else { return 0 };
+        team.roster
+            .iter()
+            .filter_map(|pid| self.players.iter().find(|p| p.id == *pid))
+            .map(|p| p.contract.salary)
+            .sum()
+    }
+
+    /// Cap room (can be negative) for a team.
+    pub fn team_cap_space(&self, tid: TeamId) -> i64 {
+        SALARY_CAP as i64 - self.team_payroll(tid) as i64
+    }
+
+    /// Decrement every contract by a year and release any that expire to the
+    /// free-agent pool. Called at season's end.
+    fn process_contracts(&mut self) {
+        let mut released: Vec<PlayerId> = Vec::new();
+        for p in &mut self.players {
+            if p.team.is_some() && p.contract.years > 0 {
+                p.contract.years -= 1;
+                if p.contract.years == 0 {
+                    released.push(p.id);
+                }
+            }
+        }
+        for pid in released {
+            if let Some(p) = self.players.iter_mut().find(|p| p.id == pid) {
+                let team = p.team.take();
+                p.contract = Contract::free_agent();
+                if let Some(tid) = team {
+                    if let Some(t) = self.teams.iter_mut().find(|t| t.id == tid) {
+                        t.roster.retain(|x| *x != pid);
+                    }
+                }
+            }
+        }
+    }
+
     /// Build the end-of-season recap for the user's team. Call after playoffs.
     pub fn season_recap(&self) -> Option<SeasonRecap> {
         let uid = self.user_team_id?;
@@ -934,6 +1024,8 @@ impl League {
                 });
             }
         }
+        // Tick down contracts; expiring players hit the free-agent pool.
+        self.process_contracts();
         self.phase = Phase::Offseason;
     }
 
@@ -974,6 +1066,7 @@ impl League {
                 potential,
                 team: None,
                 draft_season: None,
+                contract: Contract::free_agent(),
             });
             prospects.push(id);
         }
@@ -1084,8 +1177,8 @@ impl League {
 
     /// Make the pick currently on the clock for `player_id` and advance.
     fn apply_pick(&mut self, player_id: PlayerId) {
-        let (idx, team_id) = match &self.draft {
-            Some(d) if !d.is_complete() => (d.on_clock, d.picks[d.on_clock].team_id),
+        let (idx, team_id, pick_no) = match &self.draft {
+            Some(d) if !d.is_complete() => (d.on_clock, d.picks[d.on_clock].team_id, d.picks[d.on_clock].overall),
             _ => return,
         };
         if let Some(d) = self.draft.as_mut() {
@@ -1097,6 +1190,8 @@ impl League {
         if let Some(p) = self.players.iter_mut().find(|p| p.id == player_id) {
             p.team = Some(team_id);
             p.draft_season = Some(season);
+            // Rookies sign a cheap 3-year scale deal by draft slot.
+            p.contract = Contract { salary: rookie_scale(pick_no), years: 3 };
         }
         if let Some(t) = self.teams.iter_mut().find(|t| t.id == team_id) {
             t.roster.push(player_id);
@@ -1162,6 +1257,327 @@ impl League {
         }
     }
 
+    // ---- Trades ----
+
+    /// Day after which in-season trades are no longer allowed.
+    const TRADE_DEADLINE_DAY: u32 = 50;
+
+    /// Can a trade be made right now? (In-season before the deadline, or in the
+    /// offseason.)
+    pub fn can_trade(&self) -> bool {
+        match self.phase {
+            Phase::RegularSeason => self.current_day().map(|d| d < Self::TRADE_DEADLINE_DAY).unwrap_or(false),
+            Phase::Offseason => true,
+            _ => false,
+        }
+    }
+
+    /// A player's value as a trade asset (production, upside, age, contract).
+    pub fn player_trade_value(&self, pid: PlayerId) -> f64 {
+        let Some(p) = self.players.iter().find(|p| p.id == pid) else { return 0.0 };
+        let ovr = p.overall() as f64;
+        let base = (ovr - 40.0).max(0.0).powf(1.9);
+        let upside = if p.age < 25 { (p.potential as f64 - ovr).max(0.0) * 6.0 } else { 0.0 };
+        let age_pen = (p.age as f64 - 29.0).max(0.0) * 18.0;
+        // Being paid above market hurts value; a bargain deal helps it.
+        let burden = (p.contract.salary as f64 - market_salary(p.overall()) as f64) * 0.015;
+        (base + upside - age_pen - burden).max(0.0)
+    }
+
+    fn sum_salary(&self, ids: &[PlayerId]) -> u32 {
+        ids.iter()
+            .filter_map(|pid| self.players.iter().find(|p| p.id == *pid))
+            .map(|p| p.contract.salary)
+            .sum()
+    }
+
+    fn sum_value(&self, ids: &[PlayerId]) -> f64 {
+        ids.iter().map(|pid| self.player_trade_value(*pid)).sum()
+    }
+
+    /// Is a team's incoming salary legal given what it sends out? (Either it
+    /// ends under the cap, or salaries match within ~25%.)
+    fn salary_legal(&self, post_payroll: i64, incoming: u32, outgoing: u32) -> bool {
+        post_payroll <= SALARY_CAP as i64 || incoming as f64 <= outgoing as f64 * 1.25 + 1_000.0
+    }
+
+    /// Evaluate (without executing) a proposed trade: the user sends `give` and
+    /// receives `get` from `other`.
+    pub fn evaluate_trade(&self, other: TeamId, give: &[PlayerId], get: &[PlayerId]) -> TradeEval {
+        let mut eval = TradeEval {
+            legal: false,
+            accepted: false,
+            give_salary: self.sum_salary(give),
+            get_salary: self.sum_salary(get),
+            give_value: self.sum_value(give),
+            get_value: self.sum_value(get),
+            message: String::new(),
+        };
+        let Some(user) = self.user_team_id else {
+            eval.message = "No team selected.".into();
+            return eval;
+        };
+        if give.is_empty() && get.is_empty() {
+            eval.message = "Add players to both sides.".into();
+            return eval;
+        }
+
+        // Roster sizes after the swap.
+        let user_size = self.roster_len(user) as i64 - give.len() as i64 + get.len() as i64;
+        let other_size = self.roster_len(other) as i64 - get.len() as i64 + give.len() as i64;
+        if user_size > Self::ROSTER_MAX as i64 || other_size > Self::ROSTER_MAX as i64 {
+            eval.message = "That would put a team over the 15-man roster limit.".into();
+            return eval;
+        }
+        if user_size < 1 || other_size < 1 {
+            eval.message = "Both teams must keep at least one player.".into();
+            return eval;
+        }
+
+        // Salary legality for both teams.
+        let user_post = self.team_payroll(user) as i64 - eval.give_salary as i64 + eval.get_salary as i64;
+        let other_post = self.team_payroll(other) as i64 - eval.get_salary as i64 + eval.give_salary as i64;
+        let user_ok = self.salary_legal(user_post, eval.get_salary, eval.give_salary);
+        let other_ok = self.salary_legal(other_post, eval.give_salary, eval.get_salary);
+        if !user_ok || !other_ok {
+            eval.message = "Salaries don't match (must be within ~25% unless under the cap).".into();
+            return eval;
+        }
+        eval.legal = true;
+
+        // The CPU accepts only if it comes out ahead on value.
+        let other_gains = eval.give_value - eval.get_value;
+        if other_gains >= eval.get_value * 0.05 + 20.0 {
+            eval.accepted = true;
+            eval.message = "Accepted! They like this deal.".into();
+        } else if other_gains >= -20.0 {
+            eval.message = "They're close — sweeten it a little.".into();
+        } else {
+            eval.message = "Rejected. They want more value coming back.".into();
+        }
+        eval
+    }
+
+    /// Execute the trade if it is legal and the CPU accepts. Returns success.
+    pub fn execute_trade(&mut self, other: TeamId, give: &[PlayerId], get: &[PlayerId]) -> bool {
+        let Some(user) = self.user_team_id else { return false };
+        // Validate ownership.
+        let give_ok = give.iter().all(|pid| self.players.iter().any(|p| p.id == *pid && p.team == Some(user)));
+        let get_ok = get.iter().all(|pid| self.players.iter().any(|p| p.id == *pid && p.team == Some(other)));
+        if !give_ok || !get_ok {
+            return false;
+        }
+        let eval = self.evaluate_trade(other, give, get);
+        if !eval.legal || !eval.accepted {
+            return false;
+        }
+        // Move players.
+        for &pid in give {
+            if let Some(p) = self.players.iter_mut().find(|p| p.id == pid) {
+                p.team = Some(other);
+            }
+        }
+        for &pid in get {
+            if let Some(p) = self.players.iter_mut().find(|p| p.id == pid) {
+                p.team = Some(user);
+            }
+        }
+        if let Some(t) = self.teams.iter_mut().find(|t| t.id == user) {
+            t.roster.retain(|x| !give.contains(x));
+            t.roster.extend(get.iter().copied());
+        }
+        if let Some(t) = self.teams.iter_mut().find(|t| t.id == other) {
+            t.roster.retain(|x| !get.contains(x));
+            t.roster.extend(give.iter().copied());
+        }
+        true
+    }
+
+    // ---- Free agency ----
+
+    const ROSTER_MAX: usize = 15;
+
+    /// Open the offseason free-agency period. The pool is every unsigned player
+    /// (expired contracts + undrafted prospects), best first.
+    pub fn enter_free_agency(&mut self) {
+        let mut pool: Vec<PlayerId> = self
+            .players
+            .iter()
+            .filter(|p| p.team.is_none())
+            .map(|p| p.id)
+            .collect();
+        pool.sort_by_key(|pid| {
+            std::cmp::Reverse(self.players.iter().find(|p| p.id == *pid).map(|p| p.overall()).unwrap_or(0))
+        });
+        self.free_agency = Some(FreeAgency { round: 1, pool, offers: Vec::new(), log: Vec::new() });
+        self.phase = Phase::FreeAgency;
+    }
+
+    fn roster_len(&self, tid: TeamId) -> usize {
+        self.teams.iter().find(|t| t.id == tid).map(|t| t.roster.len()).unwrap_or(0)
+    }
+
+    /// The user makes (or replaces) an offer to a free agent. Returns false if
+    /// it doesn't fit the roster or the cap.
+    pub fn fa_user_offer(&mut self, pid: PlayerId, salary: u32, years: u8) -> bool {
+        let Some(user) = self.user_team_id else { return false };
+        let in_pool = self.free_agency.as_ref().map(|fa| fa.pool.contains(&pid)).unwrap_or(false);
+        if !in_pool || self.roster_len(user) >= Self::ROSTER_MAX {
+            return false;
+        }
+        let salary = salary.clamp(MIN_SALARY, 48_000);
+        if (salary as i64) > self.team_cap_space(user) {
+            return false;
+        }
+        let years = years.clamp(1, 5);
+        if let Some(fa) = self.free_agency.as_mut() {
+            fa.offers.retain(|(p, o)| !(*p == pid && o.team == user));
+            fa.offers.push((pid, FaOffer { team: user, salary, years }));
+        }
+        true
+    }
+
+    /// Remove the user's offer to a player.
+    pub fn fa_clear_user_offer(&mut self, pid: PlayerId) {
+        let Some(user) = self.user_team_id else { return };
+        if let Some(fa) = self.free_agency.as_mut() {
+            fa.offers.retain(|(p, o)| !(*p == pid && o.team == user));
+        }
+    }
+
+    /// Run one round of free agency: CPU teams make offers, then every free
+    /// agent with an offer signs the most appealing one.
+    pub fn fa_sim_round(&mut self) {
+        let Some(user) = self.user_team_id else { return };
+        let Some(fa) = self.free_agency.as_ref() else { return };
+        let round = fa.round;
+
+        // Precompute lookups so we can mutate players/teams afterward.
+        let ovr: HashMap<PlayerId, u8> = self.players.iter().map(|p| (p.id, p.overall())).collect();
+        let age: HashMap<PlayerId, u8> = self.players.iter().map(|p| (p.id, p.age)).collect();
+        let pname: HashMap<PlayerId, String> = self.players.iter().map(|p| (p.id, p.name.clone())).collect();
+        let abbrev: HashMap<TeamId, String> = self.teams.iter().map(|t| (t.id, t.abbrev.clone())).collect();
+        let strength: HashMap<TeamId, f64> = self.teams.iter().map(|t| (t.id, t.strength(&self.players))).collect();
+
+        let mut room: HashMap<TeamId, i32> = self.teams.iter().map(|t| (t.id, Self::ROSTER_MAX as i32 - t.roster.len() as i32)).collect();
+        let mut space: HashMap<TeamId, i64> = self.teams.iter().map(|t| (t.id, self.team_cap_space(t.id))).collect();
+
+        let mut pool_sorted = fa.pool.clone();
+        pool_sorted.sort_by_key(|pid| std::cmp::Reverse(*ovr.get(pid).unwrap_or(&0)));
+
+        let mut offers: Vec<(PlayerId, FaOffer)> = fa.offers.clone();
+
+        // CPU offers: each team chases the best couple of affordable FAs.
+        let years_for = |a: u8| if a <= 27 { 4 } else if a <= 31 { 3 } else { 2 };
+        for t in &self.teams {
+            if t.id == user || room[&t.id] <= 0 {
+                continue;
+            }
+            let mut sp = space[&t.id];
+            let mut made = 0;
+            for &pid in &pool_sorted {
+                if made >= 2 {
+                    break;
+                }
+                let mkt = market_salary(*ovr.get(&pid).unwrap_or(&50)) as i64;
+                let already = offers.iter().any(|(p, o)| *p == pid && o.team == t.id);
+                if !already && mkt <= sp {
+                    offers.push((pid, FaOffer { team: t.id, salary: mkt as u32, years: years_for(*age.get(&pid).unwrap_or(&25)) }));
+                    sp -= mkt;
+                    made += 1;
+                }
+            }
+        }
+
+        // Resolve: best FAs first pick the most appealing valid offer.
+        let mut rng = StdRng::seed_from_u64(self.seed ^ 0xFADE_u64 ^ round as u64);
+        let mut signings: Vec<(PlayerId, FaOffer)> = Vec::new();
+        for &pid in &pool_sorted {
+            let mut best: Option<FaOffer> = None;
+            let mut best_u = f64::MIN;
+            for (p, o) in offers.iter().filter(|(p, _)| *p == pid) {
+                let _ = p;
+                if room[&o.team] <= 0 || (o.salary as i64) > space[&o.team] {
+                    continue;
+                }
+                let money = o.salary as f64 * o.years as f64;
+                let u = money + strength[&o.team] * 150.0 + rng.gen_range(0.0..3000.0);
+                if u > best_u {
+                    best_u = u;
+                    best = Some(o.clone());
+                }
+            }
+            if let Some(o) = best {
+                *room.get_mut(&o.team).unwrap() -= 1;
+                *space.get_mut(&o.team).unwrap() -= o.salary as i64;
+                signings.push((pid, o));
+            }
+        }
+
+        // Apply signings.
+        let mut log = Vec::new();
+        for (pid, o) in &signings {
+            if let Some(p) = self.players.iter_mut().find(|p| p.id == *pid) {
+                p.team = Some(o.team);
+                p.contract = Contract { salary: o.salary, years: o.years };
+            }
+            if let Some(t) = self.teams.iter_mut().find(|t| t.id == o.team) {
+                t.roster.push(*pid);
+            }
+            log.push(format!(
+                "{} \u{2192} {} ({}, {}yr)",
+                pname.get(pid).cloned().unwrap_or_default(),
+                abbrev.get(&o.team).cloned().unwrap_or_default(),
+                Contract { salary: o.salary, years: o.years }.salary_str(),
+                o.years,
+            ));
+        }
+
+        if let Some(fa) = self.free_agency.as_mut() {
+            for (pid, _) in &signings {
+                fa.pool.retain(|x| x != pid);
+            }
+            fa.offers.clear();
+            fa.round += 1;
+            fa.log = log;
+        }
+    }
+
+    /// End free agency: fill out thin CPU rosters with the best remaining free
+    /// agents (minimum deals), then tip off the new season.
+    pub fn fa_finish(&mut self) {
+        let user = self.user_team_id;
+        let ovr: HashMap<PlayerId, u8> = self.players.iter().map(|p| (p.id, p.overall())).collect();
+        // Every team needs a workable roster (>= 12).
+        let team_ids: Vec<TeamId> = self.teams.iter().map(|t| t.id).collect();
+        for tid in team_ids {
+            if Some(tid) == user {
+                continue; // the user manages their own roster
+            }
+            while self.roster_len(tid) < 12 {
+                let mut pool: Vec<PlayerId> = self
+                    .free_agency
+                    .as_ref()
+                    .map(|fa| fa.pool.clone())
+                    .unwrap_or_default();
+                pool.sort_by_key(|pid| std::cmp::Reverse(*ovr.get(pid).unwrap_or(&0)));
+                let Some(pid) = pool.first().copied() else { break };
+                let salary = market_salary(*ovr.get(&pid).unwrap_or(&50)).max(MIN_SALARY);
+                if let Some(p) = self.players.iter_mut().find(|p| p.id == pid) {
+                    p.team = Some(tid);
+                    p.contract = Contract { salary, years: 2 };
+                }
+                if let Some(t) = self.teams.iter_mut().find(|t| t.id == tid) {
+                    t.roster.push(pid);
+                }
+                if let Some(fa) = self.free_agency.as_mut() {
+                    fa.pool.retain(|x| *x != pid);
+                }
+            }
+        }
+        self.start_new_season();
+    }
+
     // ---- New season ----
 
     /// Roll into the next season: clear the draft, age players, reset records
@@ -1170,6 +1586,7 @@ impl League {
     pub fn start_new_season(&mut self) {
         self.season += 1;
         self.draft = None;
+        self.free_agency = None;
         // Age and develop every player (young grow toward potential, vets decline).
         let mut dev_rng = StdRng::seed_from_u64(self.seed ^ 0xDE7_u64 ^ (self.season as u64));
         for p in &mut self.players {
