@@ -297,6 +297,45 @@ body {
 .award-lbl { color: var(--muted); font-weight: 700; font-size: .78rem; text-transform: uppercase; letter-spacing: .03em; }
 .award-name { font-weight: 700; }
 
+/* Roster cap summary */
+.roster-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: .5rem; }
+.cap-summary { display: flex; gap: 1rem; align-items: center; font-size: .82rem; color: var(--muted); flex-wrap: wrap; }
+.cap-summary b { color: var(--text); }
+.cap-room { color: #2faa55; font-weight: 700; }
+.cap-over { color: #e0413a; font-weight: 700; }
+
+/* Free agency */
+.offer-panel { min-width: 0; }
+.offer-player { margin-bottom: .5rem; }
+.offer-name { font-size: 1.2rem; font-weight: 800; }
+.offer-meta { color: var(--muted); font-size: .85rem; }
+.offer-current { color: var(--accent); font-weight: 700; margin: .35rem 0; }
+.offer-form { display: flex; gap: 1rem; margin: .75rem 0; }
+.offer-form label { display: flex; flex-direction: column; gap: .25rem; font-size: .75rem; color: var(--muted); font-weight: 700; }
+.offer-form .input { width: 110px; }
+.offer-actions { display: flex; gap: .6rem; align-items: center; margin-top: .5rem; }
+.offer-msg { color: var(--muted); font-size: .85rem; }
+.row.sel { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+.fa-log { margin-top: 1.25rem; }
+.fa-log-list { display: flex; flex-wrap: wrap; gap: .4rem; }
+.fa-log-item { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: .3rem .6rem; font-size: .82rem; }
+
+/* Trades */
+.trade-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: .75rem 0; }
+@media (max-width: 800px) { .trade-cols { grid-template-columns: 1fr; } }
+.trade-side { display: flex; flex-direction: column; gap: .3rem; }
+.trade-row { display: flex; flex-direction: column; padding: .45rem .6rem; border: 1px solid var(--border); border-radius: 9px; cursor: pointer; background: var(--panel-2); }
+.trade-row:hover { background: var(--row-hover); }
+.trade-row.picked { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.tr-name { font-weight: 700; }
+.tr-meta { color: var(--muted); font-size: .75rem; }
+.trade-verdict { border-radius: 12px; padding: .75rem 1rem; margin: .5rem 0; border: 1px solid var(--border); }
+.trade-verdict.ok { background: color-mix(in srgb, #2faa55 18%, transparent); border-color: #2faa55; }
+.trade-verdict.warn { background: color-mix(in srgb, #e6a23c 16%, transparent); }
+.trade-verdict.bad { background: color-mix(in srgb, #e0413a 14%, transparent); }
+.trade-salaries { font-weight: 700; }
+.trade-msg { color: var(--text); font-size: .9rem; margin-top: .2rem; }
+
 /* Draft */
 .draft-actions { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
 .draft-cols { display: grid; grid-template-columns: 320px 1fr; gap: 1.25rem; margin-top: 1.75rem; }

@@ -2,7 +2,7 @@
 //! prospect board on the right. The user drafts on their pick; "Sim to my
 //! pick" and "Sim entire draft" handle the rest.
 
-use crate::state::{AppState, Tab};
+use crate::state::AppState;
 use crate::ui::ThemeToggle;
 use leptos::prelude::*;
 
@@ -35,13 +35,7 @@ pub fn DraftScreen() -> impl IntoView {
     // Actions.
     let sim_to_me = move |_| state.update_league(|l| l.draft_sim_to_user());
     let sim_all = move |_| state.update_league(|l| l.draft_sim_all());
-    let start_season = {
-        let tab = state.tab;
-        move |_| {
-            state.update_league(|l| l.start_new_season());
-            tab.set(Tab::Standings);
-        }
-    };
+    let to_fa = move |_| state.update_league(|l| l.enter_free_agency());
 
     view! {
         <div class="builder">
@@ -60,8 +54,8 @@ pub fn DraftScreen() -> impl IntoView {
                             <button class="btn" on:click=sim_all>"Sim Entire Draft"</button>
                         }
                     >
-                        <button class="btn btn-primary" on:click=start_season>
-                            {move || format!("Start Season {} \u{2192}", season() + 1)}
+                        <button class="btn btn-primary" on:click=to_fa>
+                            "Continue to Free Agency \u{2192}"
                         </button>
                     </Show>
                     <ThemeToggle/>

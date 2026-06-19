@@ -54,6 +54,7 @@ pub fn App() -> impl IntoView {
             {move || match phase() {
                 Phase::TeamSelect => view! { <TeamBuilder/> }.into_any(),
                 Phase::Draft => view! { <DraftScreen/> }.into_any(),
+                Phase::FreeAgency => view! { <crate::free_agency::FreeAgencyScreen/> }.into_any(),
                 _ => view! { <Dashboard/> }.into_any(),
             }}
         </div>

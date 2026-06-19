@@ -4,6 +4,7 @@
 mod app;
 mod dashboard;
 mod draft;
+mod free_agency;
 mod state;
 mod team_builder;
 mod ui;

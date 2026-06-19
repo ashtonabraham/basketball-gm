@@ -23,6 +23,7 @@ pub fn Dashboard() -> impl IntoView {
                         Tab::Schedule => view! { <SchedulePanel/> }.into_any(),
                         Tab::Roster => view! { <RosterPanel/> }.into_any(),
                         Tab::Stats => view! { <StatsPanel/> }.into_any(),
+                        Tab::Trades => view! { <TradesPanel/> }.into_any(),
                         Tab::Playoffs => view! { <PlayoffsPanel/> }.into_any(),
                         Tab::History => view! { <HistoryPanel/> }.into_any(),
                     }}
@@ -136,6 +137,7 @@ fn Sidebar() -> impl IntoView {
                 {nav_btn(Tab::Schedule, "Schedule")}
                 {nav_btn(Tab::Roster, "Roster")}
                 {nav_btn(Tab::Stats, "Stats")}
+                {nav_btn(Tab::Trades, "Trades")}
                 {nav_btn(Tab::Playoffs, "Playoffs")}
                 {nav_btn(Tab::History, "History")}
             </nav>
@@ -171,6 +173,7 @@ fn TopBar() -> impl IntoView {
             Phase::Playoffs => "Playoffs".to_string(),
             Phase::Offseason => "Offseason".to_string(),
             Phase::Draft => "Draft".to_string(),
+            Phase::FreeAgency => "Free Agency".to_string(),
         }
     };
 
@@ -349,6 +352,7 @@ fn RosterPanel() -> impl IntoView {
                 .map(|p| {
                     let r = &p.ratings;
                     (p.name.clone(), p.position.abbrev(), p.age, p.overall(), p.potential,
+                     p.contract.salary_str(), p.contract.years,
                      r.layup, r.dunk, r.three, r.passing, r.ball_handling,
                      r.rebounding, r.defense, r.athleticism)
                 })
@@ -357,20 +361,42 @@ fn RosterPanel() -> impl IntoView {
             ps
         })
     };
+    let cap = move || {
+        state.league.with(|l| {
+            let Some(id) = l.user_team_id else { return (0.0, 0.0, 0.0, 0usize) };
+            let payroll = l.team_payroll(id) as f64 / 1000.0;
+            let cap = engine::SALARY_CAP as f64 / 1000.0;
+            let space = l.team_cap_space(id) as f64 / 1000.0;
+            let count = l.teams.iter().find(|t| t.id == id).map(|t| t.roster.len()).unwrap_or(0);
+            (payroll, cap, space, count)
+        })
+    };
 
     view! {
         <div class="card">
-            <h3 class="card-title">"Roster"</h3>
+            <div class="roster-head">
+                <h3 class="card-title">"Roster"</h3>
+                {move || { let (pay, cap_, space, count) = cap(); view! {
+                    <div class="cap-summary">
+                        <span>{format!("{} players", count)}</span>
+                        <span>"Payroll "<b>{format!("${:.1}M", pay)}</b>{format!(" / ${:.0}M cap", cap_)}</span>
+                        <span class=if space < 0.0 { "cap-over" } else { "cap-room" }>
+                            {format!("{} ${:.1}M", if space < 0.0 { "Over by" } else { "Room:" }, space.abs())}
+                        </span>
+                    </div>
+                }}}
+            </div>
             <table class="tbl">
                 <thead><tr>
                     <th class="left">"Player"</th><th>"Pos"</th><th>"Age"</th><th>"OVR"</th>
                     <th title="Potential (peak overall)">"POT"</th>
+                    <th title="Salary">"Salary"</th><th title="Years left">"Yrs"</th>
                     <th title="Layup">"Lay"</th><th title="Dunk">"Dnk"</th><th title="Three-point">"3pt"</th>
                     <th title="Passing">"Pas"</th><th title="Ball handling">"Hdl"</th>
                     <th title="Rebounding">"Reb"</th><th title="Defense">"Def"</th><th title="Athleticism">"Ath"</th>
                 </tr></thead>
                 <tbody>
-                    {move || players().into_iter().map(|(name, pos, age, ovr, pot, lay, dnk, three, pas, hdl, reb, def, ath)| {
+                    {move || players().into_iter().map(|(name, pos, age, ovr, pot, salary, years, lay, dnk, three, pas, hdl, reb, def, ath)| {
                         let upside = pot > ovr;
                         view! {
                             <tr class="row">
@@ -379,6 +405,7 @@ fn RosterPanel() -> impl IntoView {
                                 <td>{age}</td>
                                 <td><span class="ovr">{ovr}</span></td>
                                 <td><span class=if upside { "pot up" } else { "pot" }>{pot}</span></td>
+                                <td>{salary}</td><td>{years}</td>
                                 <td>{lay}</td><td>{dnk}</td><td>{three}</td>
                                 <td>{pas}</td><td>{hdl}</td>
                                 <td>{reb}</td><td>{def}</td><td>{ath}</td>
@@ -388,6 +415,132 @@ fn RosterPanel() -> impl IntoView {
                 </tbody>
             </table>
         </div>
+    }
+}
+
+#[component]
+fn TradesPanel() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let league = state.league;
+
+    let can_trade = move || league.with(|l| l.can_trade());
+    let other = RwSignal::new(None::<u32>);
+    let give = RwSignal::new(Vec::<u32>::new());
+    let get = RwSignal::new(Vec::<u32>::new());
+    let msg = RwSignal::new(String::new());
+
+    // Opponent options (all teams but the user's).
+    let teams = move || league.with(|l| {
+        let user = l.user_team_id;
+        l.teams.iter().filter(|t| Some(t.id) != user).map(|t| (t.id, t.full_name())).collect::<Vec<_>>()
+    });
+
+    // A team's roster as (id, name, pos, ovr, salary, value).
+    let roster = move |tid: Option<u32>| league.with(|l| {
+        let Some(tid) = tid else { return Vec::new() };
+        let Some(team) = l.teams.iter().find(|t| t.id == tid) else { return Vec::new() };
+        let mut v: Vec<_> = team.roster.iter().filter_map(|pid| {
+            let p = l.players.iter().find(|p| p.id == *pid)?;
+            Some((p.id, p.name.clone(), p.position.abbrev(), p.overall(), p.contract.salary_str(), l.player_trade_value(p.id).round() as i64))
+        }).collect();
+        v.sort_by(|a, b| b.3.cmp(&a.3));
+        v
+    });
+    let user_id = move || league.with(|l| l.user_team_id);
+
+    let eval = move || {
+        let o = other.get()?;
+        let (g, r) = (give.get(), get.get());
+        if g.is_empty() && r.is_empty() { return None; }
+        Some(league.with(|l| l.evaluate_trade(o, &g, &r)))
+    };
+
+    let toggle_give = move |pid: u32| give.update(|v| if v.contains(&pid) { v.retain(|x| *x != pid) } else { v.push(pid) });
+    let toggle_get = move |pid: u32| get.update(|v| if v.contains(&pid) { v.retain(|x| *x != pid) } else { v.push(pid) });
+
+    let propose = move |_| {
+        if let Some(o) = other.get() {
+            let (g, r) = (give.get(), get.get());
+            let ok = { let mut d = false; state.update_league(|l| d = l.execute_trade(o, &g, &r)); d };
+            if ok {
+                msg.set("\u{2705} Trade completed!".into());
+                give.set(vec![]);
+                get.set(vec![]);
+            } else {
+                msg.set("They turned it down.".into());
+            }
+        }
+    };
+
+    view! {
+        <Show when=can_trade fallback=|| view! {
+            <div class="card"><p class="empty">"Trades are closed right now (past the in-season deadline). Come back next offseason or earlier next season."</p></div>
+        }>
+            <div class="card">
+                <div class="roster-head">
+                    <h3 class="card-title">"Trade"</h3>
+                    <select class="input" on:change=move |e| {
+                        other.set(event_target_value(&e).parse().ok());
+                        get.set(vec![]);
+                        msg.set(String::new());
+                    }>
+                        <option value="">"Select a team\u{2026}"</option>
+                        {move || teams().into_iter().map(|(id, name)| view! {
+                            <option value=id.to_string()>{name}</option>
+                        }).collect_view()}
+                    </select>
+                </div>
+
+                <div class="trade-cols">
+                    <div class="trade-side">
+                        <h4 class="round-name">"You send"</h4>
+                        {move || roster(user_id()).into_iter().map(move |(id, name, pos, ovr, sal, val)| {
+                            let picked = move || give.get().contains(&id);
+                            view! {
+                                <div class=move || if picked() { "trade-row picked" } else { "trade-row" }
+                                    on:click=move |_| toggle_give(id)>
+                                    <span class="tr-name">{name}</span>
+                                    <span class="tr-meta">{pos}" \u{2022} "{ovr}" \u{2022} "{sal}" \u{2022} val "{val}</span>
+                                </div>
+                            }
+                        }).collect_view()}
+                    </div>
+                    <div class="trade-side">
+                        <h4 class="round-name">"You receive"</h4>
+                        {move || roster(other.get()).into_iter().map(move |(id, name, pos, ovr, sal, val)| {
+                            let picked = move || get.get().contains(&id);
+                            view! {
+                                <div class=move || if picked() { "trade-row picked" } else { "trade-row" }
+                                    on:click=move |_| toggle_get(id)>
+                                    <span class="tr-name">{name}</span>
+                                    <span class="tr-meta">{pos}" \u{2022} "{ovr}" \u{2022} "{sal}" \u{2022} val "{val}</span>
+                                </div>
+                            }
+                        }).collect_view()}
+                    </div>
+                </div>
+
+                {move || eval().map(|e| {
+                    let cls = if e.accepted { "trade-verdict ok" } else if e.legal { "trade-verdict warn" } else { "trade-verdict bad" };
+                    view! {
+                        <div class=cls>
+                            <div class="trade-salaries">
+                                {format!("Out ${:.1}M  \u{2194}  In ${:.1}M", e.give_salary as f64 / 1000.0, e.get_salary as f64 / 1000.0)}
+                            </div>
+                            <div class="trade-msg">{e.message}</div>
+                        </div>
+                    }
+                })}
+
+                <div class="offer-actions">
+                    <button class="btn btn-primary" on:click=propose
+                        disabled=move || !eval().map(|e| e.accepted).unwrap_or(false)>
+                        "Propose Trade"
+                    </button>
+                    <span class="offer-msg">{move || msg.get()}</span>
+                </div>
+            </div>
+        </Show>
     }
 }
 
