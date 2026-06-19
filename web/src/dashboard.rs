@@ -391,35 +391,96 @@ fn RosterPanel() -> impl IntoView {
     }
 }
 
+/// One series rendered in the bracket.
+#[derive(Clone)]
+struct SeriesView {
+    ha: String, hc1: String, hc2: String, hw: u8,
+    la: String, lc1: String, lc2: String, lw: u8,
+    hi_won: bool, lo_won: bool, has_user: bool,
+}
+
+#[component]
+fn SeriesBox(data: Option<SeriesView>) -> impl IntoView {
+    match data {
+        None => view! { <div class="series placeholder"><div class="seed-line">"\u{2014}"</div><div class="seed-line">"\u{2014}"</div></div> }.into_any(),
+        Some(s) => {
+            let cls = if s.has_user { "series user" } else { "series" };
+            view! {
+                <div class=cls>
+                    <div class=if s.hi_won { "seed-line won" } else { "seed-line" }>
+                        <span class="mini-logo" style=format!("--c1:{};--c2:{}", s.hc1, s.hc2)>{s.ha.clone()}</span>
+                        <span class="seed-name">{s.ha}</span>
+                        <span class="wins">{s.hw}</span>
+                    </div>
+                    <div class=if s.lo_won { "seed-line won" } else { "seed-line" }>
+                        <span class="mini-logo" style=format!("--c1:{};--c2:{}", s.lc1, s.lc2)>{s.la.clone()}</span>
+                        <span class="seed-name">{s.la}</span>
+                        <span class="wins">{s.lw}</span>
+                    </div>
+                </div>
+            }.into_any()
+        }
+    }
+}
+
 #[component]
 fn PlayoffsPanel() -> impl IntoView {
     let state = expect_context::<AppState>();
     let has_po = move || state.league.with(|l| l.playoffs.is_some());
 
-    // Each series carries both teams' badge (abbrev + colors) and series score.
-    let rounds = move || {
+    // Build the seven columns of a 2K-style bracket: West fans in from the
+    // left, East from the right, Finals in the middle. Each column is padded
+    // with `None` placeholders so the bracket shape shows before it fills in.
+    let bracket = move || {
         state.league.with(|l| {
+            let uid = l.user_team_id;
             let badge = |id: u32| {
-                l.teams.iter().find(|t| t.id == id).map(|t| {
-                    (t.abbrev.clone(), t.primary.hex().to_string(), t.secondary.hex().to_string())
-                }).unwrap_or_default()
+                l.teams.iter().find(|t| t.id == id)
+                    .map(|t| (t.abbrev.clone(), t.primary.hex().to_string(), t.secondary.hex().to_string()))
+                    .unwrap_or_default()
             };
-            let Some(po) = &l.playoffs else { return Vec::new() };
-            po.rounds.iter().enumerate().map(|(ri, round)| {
-                let series = round.iter().map(|s| {
-                    let winner = s.winner();
-                    (badge(s.high), s.high_wins, badge(s.low), s.low_wins,
-                     winner == Some(s.high), winner == Some(s.low))
-                }).collect::<Vec<_>>();
-                (ROUND_NAMES.get(ri).copied().unwrap_or(""), series)
-            }).collect::<Vec<_>>()
+            let mk = |s: &engine::Series| {
+                let w = s.winner();
+                let (ha, hc1, hc2) = badge(s.high);
+                let (la, lc1, lc2) = badge(s.low);
+                SeriesView {
+                    ha, hc1, hc2, hw: s.high_wins, la, lc1, lc2, lw: s.low_wins,
+                    hi_won: w == Some(s.high), lo_won: w == Some(s.low),
+                    has_user: uid == Some(s.high) || uid == Some(s.low),
+                }
+            };
+            let po = l.playoffs.as_ref();
+            // East = first half of each round's series; West = second half.
+            let half = |r: usize, west: bool, count: usize| -> Vec<Option<SeriesView>> {
+                let mut v = Vec::new();
+                if let Some(po) = po {
+                    if let Some(round) = po.rounds.get(r) {
+                        let (start, end) = if r == 3 {
+                            (0, round.len())
+                        } else if west {
+                            (round.len() / 2, round.len())
+                        } else {
+                            (0, round.len() / 2)
+                        };
+                        for s in &round[start..end] {
+                            v.push(Some(mk(s)));
+                        }
+                    }
+                }
+                while v.len() < count { v.push(None); }
+                v
+            };
+            let champ = po.and_then(|p| p.champion)
+                .and_then(|id| l.teams.iter().find(|t| t.id == id))
+                .map(|t| t.full_name());
+            (
+                half(0, true, 4), half(1, true, 2), half(2, true, 1),
+                half(3, false, 1),
+                half(2, false, 1), half(1, false, 2), half(0, false, 4),
+                champ,
+            )
         })
     };
-    let champ = move || state.league.with(|l| {
-        l.playoffs.as_ref().and_then(|p| p.champion)
-            .and_then(|id| l.teams.iter().find(|t| t.id == id))
-            .map(|t| t.full_name())
-    });
 
     view! {
         <Show
@@ -428,32 +489,43 @@ fn PlayoffsPanel() -> impl IntoView {
         >
             <div class="card">
                 <h3 class="card-title">"Playoff Bracket"</h3>
-                {move || champ().map(|c| view! { <div class="champ-banner">"\u{1f3c6} "{c}" \u{2014} Champions"</div> })}
-                <div class="bracket">
-                    {move || rounds().into_iter().map(|(rname, series)| {
+                {move || {
+                    let (w_r1, w_se, w_cf, finals, e_cf, e_se, e_r1, champ) = bracket();
+                    let col = |title: &str, slots: Vec<Option<SeriesView>>| {
+                        let t = title.to_string();
                         view! {
-                            <div class="bracket-round">
-                                <h4 class="round-name">{rname}</h4>
-                                {series.into_iter().map(|((ha, hc1, hc2), hw, (la, lc1, lc2), lw, hi_won, lo_won)| {
-                                    view! {
-                                        <div class="series">
-                                            <div class=if hi_won { "seed-line won" } else { "seed-line" }>
-                                                <span class="mini-logo" style=format!("--c1:{};--c2:{}", hc1, hc2)>{ha.clone()}</span>
-                                                <span class="seed-name">{ha}</span>
-                                                <span class="wins">{hw}</span>
-                                            </div>
-                                            <div class=if lo_won { "seed-line won" } else { "seed-line" }>
-                                                <span class="mini-logo" style=format!("--c1:{};--c2:{}", lc1, lc2)>{la.clone()}</span>
-                                                <span class="seed-name">{la}</span>
-                                                <span class="wins">{lw}</span>
-                                            </div>
-                                        </div>
-                                    }
-                                }).collect_view()}
+                            <div class="bracket-col">
+                                <h4 class="round-name">{t}</h4>
+                                {slots.into_iter().map(|s| view! { <SeriesBox data=s/> }).collect_view()}
                             </div>
                         }
-                    }).collect_view()}
-                </div>
+                    };
+                    view! {
+                        <div class="bracket bracket-2k">
+                            <div class="conf-side">
+                                <div class="conf-label west">"Western"</div>
+                                <div class="conf-cols">
+                                    {col("First Round", w_r1)}
+                                    {col("Semis", w_se)}
+                                    {col("Conf Finals", w_cf)}
+                                </div>
+                            </div>
+                            <div class="bracket-center">
+                                <h4 class="round-name">"Finals"</h4>
+                                <SeriesBox data=finals.into_iter().next().flatten()/>
+                                {champ.map(|c| view! { <div class="champ-banner center">"\u{1f3c6} "{c}</div> })}
+                            </div>
+                            <div class="conf-side">
+                                <div class="conf-label east">"Eastern"</div>
+                                <div class="conf-cols">
+                                    {col("Conf Finals", e_cf)}
+                                    {col("Semis", e_se)}
+                                    {col("First Round", e_r1)}
+                                </div>
+                            </div>
+                        </div>
+                    }
+                }}
             </div>
         </Show>
     }

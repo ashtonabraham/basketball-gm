@@ -86,11 +86,17 @@ impl<'a> Rotation<'a> {
         roster.sort_by(|a, b| b.overall().cmp(&a.overall()));
         roster.truncate(9); // top 9 play
 
-        // Minutes weighted by overall (stars play more), normalized to 240
-        // team-minutes (5 men × 48).
-        let pow: Vec<f64> = roster.iter().map(|p| (p.overall() as f64).powf(2.2)).collect();
-        let pow_sum: f64 = pow.iter().sum::<f64>().max(1.0);
-        let minutes: Vec<f64> = pow.iter().map(|p| 240.0 * p / pow_sum).collect();
+        // Minutes follow a realistic rotation template (best players first),
+        // normalized to 240 team-minutes (5 men × 48). Using a template rather
+        // than a power of overall keeps any one player from being handed an
+        // impossible workload when a roster has a big talent gap.
+        const TEMPLATE: [f64; 9] = [38.0, 36.0, 34.0, 32.0, 30.0, 22.0, 18.0, 16.0, 14.0];
+        let raw: Vec<f64> = (0..roster.len()).map(|i| TEMPLATE[i.min(8)]).collect();
+        let raw_sum: f64 = raw.iter().sum::<f64>().max(1.0);
+        let minutes: Vec<f64> = raw
+            .iter()
+            .map(|m| (m * 240.0 / raw_sum).min(42.0))
+            .collect();
 
         let usage = roster.iter().zip(&minutes).map(|(p, m)| m * p.ratings.scoring()).collect();
         let reb_weight = roster.iter().zip(&minutes).map(|(p, m)| m * p.ratings.rebounding as f64).collect();
@@ -146,7 +152,7 @@ pub fn simulate_game(home: &Team, away: &Team, players: &[Player], rng: &mut imp
     let mut h = Rotation::build(home, players);
     let mut a = Rotation::build(away, players);
 
-    let possessions = rng.gen_range(95..=103);
+    let possessions = rng.gen_range(98..=106);
     for _ in 0..possessions {
         resolve_possession(&mut h, &mut a, HOME_EDGE, rng, 0);
         resolve_possession(&mut a, &mut h, 0.0, rng, 0);
@@ -217,8 +223,9 @@ fn resolve_possession(
     off.lines[shooter].fga += 1;
     let (made, points, assist_chance) = if is_three {
         off.lines[shooter].tpa += 1;
-        let p = (0.34 + (r.three as f64 - 50.0) * 0.005 - (def_rating - 50.0) * 0.0035 + home_edge)
-            .clamp(0.20, 0.52);
+        // Elite shooters land ~40% from deep; league ~35%.
+        let p = (0.335 + (r.three as f64 - 55.0) * 0.004 - (def_rating - 50.0) * 0.0035 + home_edge)
+            .clamp(0.18, 0.46);
         let made = rng.gen::<f64>() < p;
         if made {
             off.lines[shooter].tpm += 1;
@@ -231,9 +238,10 @@ fn resolve_possession(
         let can_dunk = r.dunk >= 68 && r.athleticism >= 64 && drive_adv > -8.0;
         let dunk = can_dunk && rng.gen::<f64>() < 0.40;
         let finish = if dunk { r.dunk } else { r.layup } as f64;
-        let base = if dunk { 0.74 } else { 0.55 };
-        let p = (base + (finish - 60.0) * 0.004 + drive_adv * 0.0035 - (def_rating - 50.0) * 0.003 + home_edge)
-            .clamp(0.22, 0.86);
+        // Dunks convert high; layups are around the low-50s for good finishers.
+        let base = if dunk { 0.68 } else { 0.52 };
+        let p = (base + (finish - 60.0) * 0.0028 + drive_adv * 0.0028 - (def_rating - 50.0) * 0.0035 + home_edge)
+            .clamp(0.20, 0.76);
         (rng.gen::<f64>() < p, 2u32, 0.55)
     };
 

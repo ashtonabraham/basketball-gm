@@ -213,8 +213,9 @@ body {
   display: inline-block; min-width: 30px; padding: .1rem .4rem; border-radius: 6px;
   background: var(--panel-2); font-weight: 800;
 }
-.pot { font-weight: 700; color: var(--muted); }
-.pot.up { color: var(--accent); }
+.pot { font-weight: 700; color: var(--text); }
+/* A player with remaining upside gets a subtle green, never the team accent. */
+.pot.up { color: #2faa55; }
 .grade { font-weight: 800; }
 .conf { color: var(--accent); font-size: .6rem; margin-left: .3rem; letter-spacing: -1px; }
 .prospect-actions { display: flex; gap: .3rem; justify-content: flex-end; }
@@ -232,6 +233,19 @@ body {
 }
 .bracket { display: flex; gap: 1rem; overflow-x: auto; padding-bottom: .5rem; }
 .bracket-round { min-width: 170px; display: flex; flex-direction: column; gap: .8rem; }
+
+/* 2K-style bracket: West fans in from the left, East from the right, Finals center. */
+.bracket-2k { display: flex; align-items: stretch; gap: 1.25rem; overflow-x: auto; padding-bottom: .5rem; }
+.conf-side { display: flex; flex-direction: column; gap: .4rem; }
+.conf-label { font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 800; }
+.conf-label.east { text-align: right; }
+.conf-cols { display: flex; gap: 1rem; flex: 1; }
+.bracket-col { display: flex; flex-direction: column; justify-content: space-around; gap: .6rem; min-width: 132px; }
+.bracket-center { display: flex; flex-direction: column; justify-content: center; align-items: center; min-width: 150px; gap: .4rem; }
+.series.placeholder { opacity: .35; }
+.series.placeholder .seed-line { justify-content: center; color: var(--muted); }
+.series.user { box-shadow: 0 0 0 2px var(--accent); border-color: var(--accent); }
+.champ-banner.center { margin-top: .5rem; text-align: center; }
 .round-name { margin: 0 0 .25rem; font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 .series { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
 .seed-line { display: flex; align-items: center; gap: .5rem; padding: .45rem .6rem; font-size: .9rem; }
