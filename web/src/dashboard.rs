@@ -397,14 +397,13 @@ fn RosterPanel() -> impl IntoView {
                 </tr></thead>
                 <tbody>
                     {move || players().into_iter().map(|(name, pos, age, ovr, pot, salary, years, lay, dnk, three, pas, hdl, reb, def, ath)| {
-                        let upside = pot > ovr;
                         view! {
                             <tr class="row">
                                 <td class="left">{name}</td>
                                 <td>{pos}</td>
                                 <td>{age}</td>
                                 <td><span class="ovr">{ovr}</span></td>
-                                <td><span class=if upside { "pot up" } else { "pot" }>{pot}</span></td>
+                                <td>{pot}</td>
                                 <td>{salary}</td><td>{years}</td>
                                 <td>{lay}</td><td>{dnk}</td><td>{three}</td>
                                 <td>{pas}</td><td>{hdl}</td>

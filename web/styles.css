@@ -213,9 +213,6 @@ body {
   display: inline-block; min-width: 30px; padding: .1rem .4rem; border-radius: 6px;
   background: var(--panel-2); font-weight: 800;
 }
-.pot { font-weight: 700; color: var(--text); }
-/* A player with remaining upside gets a subtle green, never the team accent. */
-.pot.up { color: #2faa55; }
 .grade { font-weight: 800; }
 .conf { color: var(--accent); font-size: .6rem; margin-left: .3rem; letter-spacing: -1px; }
 .prospect-actions { display: flex; gap: .3rem; justify-content: flex-end; }
