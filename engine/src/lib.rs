@@ -26,7 +26,7 @@ pub use league::{
 pub use player::{Contract, Player, Ratings, SeasonStats};
 pub use playoffs::{Playoffs, Series, ROUND_NAMES};
 pub use schedule::{Game, GameResult};
-pub use sim::{simulate_game, GameSim, PlayerLine, TeamBox};
+pub use sim::{simulate_game, simulate_game_pbp, GameSim, PlayEvent, PlayerLine, TeamBox};
 pub use standings::{conference_standings, playoff_seeds, StandingsRow};
 pub use team::Team;
 pub use teams_data::{TeamPreset, PRESETS};
@@ -296,6 +296,29 @@ mod integration_tests {
         let points1 = league.draft.as_ref().unwrap().scout_points;
         assert!(u1 < u0, "scouting should reduce uncertainty");
         assert_eq!(points1, points0 - 1, "scouting costs a point");
+    }
+
+    #[test]
+    fn simcast_produces_play_by_play() {
+        let mut league = League::new(12);
+        league.select_team(0);
+        // Find the user's first scheduled game.
+        let idx = league.schedule.iter().position(|g| g.home == 0 || g.away == 0).unwrap();
+        let events = league.watch_scheduled_game(idx).expect("events produced");
+        assert!(events.len() > 50, "a game should have many possessions");
+
+        // The final event's score matches the recorded result, and the game is
+        // now marked played.
+        let last = events.last().unwrap();
+        let res = league.schedule[idx].result.unwrap();
+        assert_eq!(last.home_score, res.home_score);
+        assert_eq!(last.away_score, res.away_score);
+        assert!(league.schedule[idx].is_played());
+
+        // Quarters and clocks are present; box snapshots are non-empty.
+        assert!(events.iter().all(|e| !e.clock.is_empty() && !e.home_box.is_empty()));
+        // Watching it again is a no-op (already played).
+        assert!(league.watch_scheduled_game(idx).is_none());
     }
 
     #[test]

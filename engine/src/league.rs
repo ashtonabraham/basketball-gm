@@ -9,7 +9,7 @@ use crate::names::{FIRST_NAMES, LAST_NAMES};
 use crate::player::{Contract, Player, Ratings, SeasonStats};
 use crate::playoffs::{first_round_pairs, high_seed_hosts, Playoffs, Series};
 use crate::schedule::{generate_schedule, Game, GameResult};
-use crate::sim::{simulate_game, TeamBox};
+use crate::sim::{simulate_game, simulate_game_pbp, PlayEvent, TeamBox};
 use crate::standings::{conference_standings, playoff_seeds};
 use crate::team::Team;
 use crate::teams_data::PRESETS;
@@ -463,6 +463,34 @@ impl League {
     /// Sim the rest of the regular season.
     pub fn sim_to_end_of_season(&mut self) {
         while self.sim_day().is_some() {}
+    }
+
+    /// Play a single scheduled game with a play-by-play feed (for the simcast),
+    /// applying its result and stats. Returns the events, or `None` if the game
+    /// index is invalid or already played.
+    pub fn watch_scheduled_game(&mut self, game_idx: usize) -> Option<Vec<PlayEvent>> {
+        let g = self.schedule.get(game_idx)?;
+        if g.is_played() {
+            return None;
+        }
+        let (home_id, away_id) = (g.home, g.away);
+        let mut rng = StdRng::seed_from_u64(self.seed.wrapping_mul(7919).wrapping_add(game_idx as u64));
+        let home = self.teams.iter().find(|t| t.id == home_id)?;
+        let away = self.teams.iter().find(|t| t.id == away_id)?;
+        let (sim, events) = simulate_game_pbp(home, away, &self.players, &mut rng);
+
+        accumulate_stats(&mut self.season_stats, &sim.home);
+        accumulate_stats(&mut self.season_stats, &sim.away);
+        let res = GameResult { home_score: sim.home.score, away_score: sim.away.score };
+        let home_won = res.home_won();
+        if let Some(t) = self.teams.iter_mut().find(|t| t.id == home_id) {
+            if home_won { t.wins += 1 } else { t.losses += 1 }
+        }
+        if let Some(t) = self.teams.iter_mut().find(|t| t.id == away_id) {
+            if home_won { t.losses += 1 } else { t.wins += 1 }
+        }
+        self.schedule[game_idx].result = Some(res);
+        Some(events)
     }
 
     // ---- Playoffs (advanced one game-day at a time) ----
