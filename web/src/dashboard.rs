@@ -35,6 +35,9 @@ pub fn Dashboard() -> impl IntoView {
             <Show when=move || state.league.with(|l| l.phase == Phase::Offseason)>
                 <RecapOverlay/>
             </Show>
+            <Show when=move || state.watching.get().is_some()>
+                <crate::simcast::SimcastOverlay/>
+            </Show>
         </div>
     }
 }
@@ -295,9 +298,10 @@ fn SchedulePanel() -> impl IntoView {
     let games = move || {
         state.league.with(|l| {
             let Some(id) = l.user_team_id else { return Vec::new() };
-            let mut v: Vec<_> = l.schedule.iter().filter(|g| g.home == id || g.away == id).collect();
-            v.sort_by_key(|g| g.day);
-            v.into_iter().map(|g| {
+            let mut v: Vec<(usize, &engine::Game)> = l.schedule.iter().enumerate()
+                .filter(|(_, g)| g.home == id || g.away == id).collect();
+            v.sort_by_key(|(_, g)| g.day);
+            v.into_iter().map(|(idx, g)| {
                 let home = g.home == id;
                 let opp_id = if home { g.away } else { g.home };
                 let opp = l.teams.iter().find(|t| t.id == opp_id).map(|t| t.abbrev.clone()).unwrap_or_default();
@@ -305,18 +309,20 @@ fn SchedulePanel() -> impl IntoView {
                     let (us, them) = if home { (r.home_score, r.away_score) } else { (r.away_score, r.home_score) };
                     (us > them, us, them)
                 });
-                (g.day + 1, home, opp, result)
+                (idx, g.day + 1, home, opp, result)
             }).collect::<Vec<_>>()
         })
     };
+    let watch = move |idx: usize| state.watching.set(Some(idx));
 
     view! {
-        <div class="card">
-            <h3 class="card-title">"Schedule"</h3>
+        <TodaysSlate/>
+        <div class="card" style="margin-top:1.25rem">
+            <h3 class="card-title">"Your Schedule"</h3>
             <table class="tbl">
-                <thead><tr><th>"Day"</th><th class="left">"Opponent"</th><th class="left">"Result"</th></tr></thead>
+                <thead><tr><th>"Day"</th><th class="left">"Opponent"</th><th class="left">"Result"</th><th></th></tr></thead>
                 <tbody>
-                    {move || games().into_iter().map(|(day, home, opp, result)| {
+                    {move || games().into_iter().map(move |(idx, day, home, opp, result)| {
                         let loc = if home { "vs" } else { "@" };
                         let (cls, txt) = match result {
                             Some((win, us, them)) => (
@@ -325,17 +331,52 @@ fn SchedulePanel() -> impl IntoView {
                             ),
                             None => ("row", "\u{2014}".to_string()),
                         };
+                        let played = result.is_some();
                         view! {
                             <tr class=cls>
                                 <td>{day}</td>
                                 <td class="left">{loc}" "{opp}</td>
                                 <td class="left">{txt}</td>
+                                <td>{(!played).then(|| view! { <button class="mini-btn" on:click=move |_| watch(idx)>"Watch"</button> })}</td>
                             </tr>
                         }
                     }).collect_view()}
                 </tbody>
             </table>
         </div>
+    }
+}
+
+/// The full slate of games on the next unplayed day — watch any of them.
+#[component]
+fn TodaysSlate() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let slate = move || state.league.with(|l| {
+        let Some(day) = l.current_day() else { return (0u32, Vec::new()) };
+        let games: Vec<(usize, String, String)> = l.schedule.iter().enumerate()
+            .filter(|(_, g)| g.day == day && !g.is_played())
+            .map(|(i, g)| {
+                let ab = |id: u32| l.teams.iter().find(|t| t.id == id).map(|t| t.abbrev.clone()).unwrap_or_default();
+                (i, ab(g.away), ab(g.home))
+            }).collect();
+        (day + 1, games)
+    });
+    let watch = move |idx: usize| state.watching.set(Some(idx));
+
+    view! {
+        <Show when=move || !slate().1.is_empty() fallback=|| view! { <span></span> }>
+            <div class="card">
+                <h3 class="card-title">{move || format!("Around the League \u{2014} Day {}", slate().0)}</h3>
+                <div class="slate-grid">
+                    {move || slate().1.into_iter().map(move |(idx, away, home)| view! {
+                        <button class="slate-game" on:click=move |_| watch(idx)>
+                            <span class="slate-match">{away}" @ "{home}</span>
+                            <span class="slate-watch">"\u{25b6} Watch"</span>
+                        </button>
+                    }).collect_view()}
+                </div>
+            </div>
+        </Show>
     }
 }
 

@@ -24,6 +24,8 @@ pub struct AppState {
     pub league: RwSignal<League>,
     pub dark: RwSignal<bool>,
     pub tab: RwSignal<Tab>,
+    /// Schedule index of the game being watched in the simcast, if any.
+    pub watching: RwSignal<Option<usize>>,
 }
 
 impl AppState {

@@ -23,7 +23,8 @@ pub fn App() -> impl IntoView {
     let league = RwSignal::new(load_saved_league().unwrap_or_else(|| League::new(time_seed())));
     let dark = RwSignal::new(load_theme());
     let tab = RwSignal::new(Tab::Standings);
-    let state = AppState { league, dark, tab };
+    let watching = RwSignal::new(None::<usize>);
+    let state = AppState { league, dark, tab, watching };
     provide_context(state);
 
     // Persist theme whenever it changes.

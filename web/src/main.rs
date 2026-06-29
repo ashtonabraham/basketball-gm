@@ -5,6 +5,7 @@ mod app;
 mod dashboard;
 mod draft;
 mod free_agency;
+mod simcast;
 mod state;
 mod team_builder;
 mod ui;

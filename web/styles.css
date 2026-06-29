@@ -355,6 +355,57 @@ body {
 .row.pickable { cursor: pointer; }
 .row.pickable:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); }
 
+/* Today's slate / watch */
+.slate-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: .5rem; }
+.slate-game {
+  display: flex; flex-direction: column; gap: .15rem; align-items: flex-start;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px;
+  padding: .55rem .7rem; cursor: pointer; color: var(--text);
+}
+.slate-game:hover { border-color: var(--accent); }
+.slate-match { font-weight: 700; font-size: .9rem; }
+.slate-watch { color: var(--accent); font-size: .72rem; font-weight: 700; }
+
+/* Simcast */
+.sim-overlay { align-items: stretch; }
+.sim-card {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 18px;
+  width: 100%; max-width: 880px; margin: auto; max-height: 90vh; display: flex; flex-direction: column;
+  box-shadow: var(--shadow); overflow: hidden;
+}
+.sim-scoreboard {
+  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 1rem;
+  padding: 1.1rem 1.4rem; border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+}
+.sim-team { display: flex; align-items: center; gap: .6rem; }
+.sim-team:last-child { justify-content: flex-end; }
+.sim-abbr { font-weight: 800; font-size: 1.05rem; }
+.sim-score { font-size: 2.1rem; font-weight: 800; min-width: 2.2ch; text-align: center; }
+.sim-center { text-align: center; display: flex; flex-direction: column; gap: .3rem; align-items: center; }
+.sim-clock { font-weight: 800; font-size: 1.05rem; color: var(--accent); font-variant-numeric: tabular-nums; }
+.sim-close { background: transparent; border: 1px solid var(--border); color: var(--muted); border-radius: 8px; padding: .25rem .55rem; font-size: .72rem; cursor: pointer; }
+.sim-close:hover { color: var(--text); }
+
+.sim-body { display: grid; grid-template-columns: 1fr 320px; gap: 0; flex: 1; min-height: 0; }
+@media (max-width: 760px) { .sim-body { grid-template-columns: 1fr; } }
+.sim-feed { padding: 1rem 1.25rem; overflow-y: auto; border-right: 1px solid var(--border); min-height: 320px; max-height: 56vh; }
+.sim-play { display: flex; align-items: center; gap: .55rem; padding: .35rem 0; border-bottom: 1px solid var(--border); font-size: .9rem; }
+.sim-play.scored { font-weight: 700; }
+.sim-play-clk { color: var(--muted); font-size: .72rem; font-variant-numeric: tabular-nums; min-width: 56px; }
+.sim-tag { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.sim-tag.home { background: var(--accent); }
+.sim-tag.away { background: var(--muted); }
+.sim-boxes { padding: 1rem; overflow-y: auto; display: flex; flex-direction: column; gap: 1rem; max-height: 56vh; }
+.sim-box-team { font-weight: 800; margin-bottom: .25rem; }
+.sim-box .tbl { font-size: .82rem; }
+
+.sim-controls { display: flex; align-items: center; gap: .75rem; padding: .9rem 1.4rem; border-top: 1px solid var(--border); flex-wrap: wrap; }
+.sim-speeds { display: flex; gap: .25rem; }
+.sim-spd { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); border-radius: 7px; padding: .35rem .6rem; font-weight: 700; font-size: .8rem; cursor: pointer; }
+.sim-spd.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.sim-progress { color: var(--muted); font-size: .8rem; margin-left: auto; font-variant-numeric: tabular-nums; }
+
 /* Recap overlay */
 .overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,.6);
