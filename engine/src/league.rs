@@ -142,6 +142,37 @@ pub struct OwnerMessage {
     pub body: String,
 }
 
+/// How interested a free agent is in the user's current offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Interest {
+    NoOffer,
+    Unlikely,
+    Lukewarm,
+    Interested,
+    Eager,
+}
+
+impl Interest {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Interest::NoOffer => "\u{2014}",
+            Interest::Unlikely => "Unlikely",
+            Interest::Lukewarm => "Lukewarm",
+            Interest::Interested => "Interested",
+            Interest::Eager => "Eager",
+        }
+    }
+}
+
+/// A trade the CPU would accept (for the trade finder).
+#[derive(Debug, Clone)]
+pub struct TradeSuggestion {
+    pub other: TeamId,
+    pub get: Vec<PlayerId>,
+    pub get_value: f64,
+    pub message: String,
+}
+
 /// The result of evaluating a proposed trade (for previewing in the UI).
 #[derive(Debug, Clone)]
 pub struct TradeEval {
@@ -1006,27 +1037,60 @@ impl League {
         };
 
         let record = format!("{}-{}", team.wins, team.losses);
-        let body = match (tone, goal) {
-            (OwnerTone::Pleased, None) => {
-                format!("Hell of a year — {record} and you had us believing. Keep it up, my son.")
+
+        // Expectation vs result.
+        let exp_word = if win_diff >= 6 { "blew past" }
+            else if win_diff >= 1 { "edged past" }
+            else if win_diff >= -5 { "came up just shy of" }
+            else { "fell well short of" };
+        let mut body = format!("At {record}, you {exp_word} the {expected_wins} wins I projected for this roster.");
+
+        // Year-over-year.
+        if let Some(h) = self.history.last() {
+            let d = team.wins as i32 - h.user_wins as i32;
+            if d > 3 {
+                body.push_str(&format!(" That's a real step up from last year's {}-{}.", h.user_wins, h.user_losses));
+            } else if d < -3 {
+                body.push_str(&format!(" We slid back from last year's {}-{}.", h.user_wins, h.user_losses));
+            } else {
+                body.push_str(&format!(" Right about where we landed last year ({}-{}).", h.user_wins, h.user_losses));
             }
-            (OwnerTone::Pleased, Some(g)) => {
-                format!("Strong season at {record}. I liked what I saw. One thing for next year: {g}.")
-            }
-            (OwnerTone::Neutral, Some(g)) => {
-                format!("A {record} season — respectable, nothing to hang our heads about. But next year, I want you to {g}.")
-            }
-            (OwnerTone::Neutral, None) => {
-                format!("A solid {record} campaign. Keep it up, my son.")
-            }
-            (OwnerTone::Displeased, Some(g)) => {
-                format!("I'll be straight with you — I expected more than {record}. Next season, {g}, or you and I are going to have a problem.")
-            }
-            (OwnerTone::Displeased, None) => {
-                format!("{record} is not what I'm paying for. I expect better next year.")
-            }
-            (OwnerTone::TooEarly, _) => unreachable!(),
-        };
+        }
+
+        // Postseason.
+        body.push_str(match self.outcome_for(uid) {
+            PlayoffOutcome::MissedPlayoffs => " Watching the playoffs from home stings.",
+            PlayoffOutcome::LostInRound(0) => " A first-round exit isn't this group's ceiling.",
+            PlayoffOutcome::LostInRound(1) => " Bowing out in the second round left meat on the bone.",
+            PlayoffOutcome::LostInRound(2) => " A conference-finals run was a genuine step forward.",
+            PlayoffOutcome::LostInRound(3) => " So close in the Finals — I can taste it.",
+            _ => "",
+        });
+
+        // A stat-driven observation.
+        let (pf, pa) = self.team_points(uid);
+        let lppg = self.league_ppg();
+        if pa - lppg > 3.0 {
+            body.push_str(" We gave up far too many points on the defensive end.");
+        } else if lppg - pf > 3.0 {
+            body.push_str(" The offense went cold too often for my liking.");
+        } else if let Some((name, ppg)) = team.roster.iter()
+            .filter_map(|pid| self.players.iter().find(|p| p.id == *pid))
+            .map(|p| (p.name.clone(), self.season_stats[p.id as usize].ppg()))
+            .filter(|(_, ppg)| *ppg > 0.0)
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        {
+            body.push_str(&format!(" {} leading us at {:.1} a night was a bright spot.", name, ppg));
+        }
+
+        // The ask, or warm words.
+        match &goal {
+            Some(g) => body.push_str(&format!(" Next season, I want you to {g}.")),
+            None => body.push_str(match tone {
+                OwnerTone::Pleased => " Keep it up, my son.",
+                _ => " Let's keep building on this.",
+            }),
+        }
 
         OwnerMessage { tone, body }
     }
@@ -1386,6 +1450,37 @@ impl League {
         eval
     }
 
+    /// Find single-player returns the CPU would accept for the given player you
+    /// put on the block. Best returns first.
+    pub fn find_trades_for(&self, give_pid: PlayerId) -> Vec<TradeSuggestion> {
+        let Some(user) = self.user_team_id else { return Vec::new() };
+        if self.players.iter().find(|p| p.id == give_pid).and_then(|p| p.team) != Some(user) {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for team in &self.teams {
+            if team.id == user {
+                continue;
+            }
+            for &rid in &team.roster {
+                let eval = self.evaluate_trade(team.id, &[give_pid], &[rid]);
+                if eval.legal && eval.accepted {
+                    let name = self.players.iter().find(|p| p.id == rid).map(|p| p.name.clone()).unwrap_or_default();
+                    out.push(TradeSuggestion {
+                        other: team.id,
+                        get: vec![rid],
+                        get_value: eval.get_value,
+                        message: format!("{} ({})", name, team.abbrev),
+                    });
+                }
+            }
+        }
+        // Best value coming back first.
+        out.sort_by(|a, b| b.get_value.partial_cmp(&a.get_value).unwrap());
+        out.truncate(12);
+        out
+    }
+
     /// Execute the trade if it is legal and the CPU accepts. Returns success.
     pub fn execute_trade(&mut self, other: TeamId, give: &[PlayerId], get: &[PlayerId]) -> bool {
         let Some(user) = self.user_team_id else { return false };
@@ -1424,6 +1519,37 @@ impl League {
     // ---- Free agency ----
 
     const ROSTER_MAX: usize = 15;
+    /// Most outstanding offers the user may have at once.
+    pub const FA_MAX_OFFERS: usize = 6;
+
+    /// How many active offers the user currently has out.
+    pub fn fa_offer_count(&self) -> usize {
+        let Some(user) = self.user_team_id else { return 0 };
+        self.free_agency.as_ref().map(|fa| fa.offers.iter().filter(|(_, o)| o.team == user).count()).unwrap_or(0)
+    }
+
+    /// A free agent's interest in the user's current offer (money vs market,
+    /// nudged by team quality).
+    pub fn fa_interest(&self, pid: PlayerId) -> Interest {
+        let Some(user) = self.user_team_id else { return Interest::NoOffer };
+        let Some(fa) = &self.free_agency else { return Interest::NoOffer };
+        let Some(offer) = fa.user_offer(pid, user) else { return Interest::NoOffer };
+        let Some(p) = self.players.iter().find(|p| p.id == pid) else { return Interest::NoOffer };
+
+        let market = market_salary(p.overall()).max(MIN_SALARY) as f64;
+        let ratio = offer.salary as f64 / market; // how generous vs market
+        // Contender appeal: user strength vs league average.
+        let league_avg = self.teams.iter().map(|t| t.strength(&self.players)).sum::<f64>() / self.teams.len() as f64;
+        let user_strength = self.teams.iter().find(|t| t.id == user).map(|t| t.strength(&self.players)).unwrap_or(league_avg);
+        let appeal = (user_strength - league_avg) * 0.01; // ~±0.15
+        let years_bonus = (offer.years as f64 - 2.0) * 0.04;
+        let score = ratio + appeal + years_bonus;
+
+        if score >= 1.25 { Interest::Eager }
+        else if score >= 1.02 { Interest::Interested }
+        else if score >= 0.85 { Interest::Lukewarm }
+        else { Interest::Unlikely }
+    }
 
     /// Open the offseason free-agency period. The pool is every unsigned player
     /// (expired contracts + undrafted prospects), best first.
@@ -1455,6 +1581,11 @@ impl League {
         }
         let salary = salary.clamp(MIN_SALARY, 48_000);
         if (salary as i64) > self.team_cap_space(user) {
+            return false;
+        }
+        // Enforce the offer cap (replacing an existing offer is always allowed).
+        let replacing = self.free_agency.as_ref().map(|fa| fa.offers.iter().any(|(p, o)| *p == pid && o.team == user)).unwrap_or(false);
+        if !replacing && self.fa_offer_count() >= Self::FA_MAX_OFFERS {
             return false;
         }
         let years = years.clamp(1, 5);

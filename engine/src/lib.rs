@@ -20,8 +20,8 @@ pub mod types;
 pub use draft::{grade_for, Draft, DraftPick, ScoutEntry};
 pub use free_agency::{FaOffer, FreeAgency};
 pub use league::{
-    market_salary, Awards, League, OwnerMessage, OwnerTone, Phase, PlayoffOutcome, SeasonHistory,
-    SeasonRecap, TradeEval, MIN_SALARY, SALARY_CAP,
+    market_salary, Awards, Interest, League, OwnerMessage, OwnerTone, Phase, PlayoffOutcome,
+    SeasonHistory, SeasonRecap, TradeEval, TradeSuggestion, MIN_SALARY, SALARY_CAP,
 };
 pub use player::{Contract, Player, Ratings, SeasonStats};
 pub use playoffs::{Playoffs, Series, ROUND_NAMES};
