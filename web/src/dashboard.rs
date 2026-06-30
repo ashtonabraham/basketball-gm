@@ -512,10 +512,62 @@ fn TradesPanel() -> impl IntoView {
         }
     };
 
+    // Trade finder: shop one of your players, see deals the CPU would accept.
+    let shop = RwSignal::new(None::<u32>);
+    let suggestions = move || league.with(|l| {
+        let Some(pid) = shop.get() else { return Vec::new() };
+        l.find_trades_for(pid).into_iter().map(|s| {
+            let ab = l.teams.iter().find(|t| t.id == s.other).map(|t| t.full_name()).unwrap_or_default();
+            (s.other, ab, s.message, s.get)
+        }).collect::<Vec<_>>()
+    });
+    let load = move |o: u32, g: Vec<u32>, getv: Vec<u32>| {
+        other.set(Some(o));
+        give.set(g);
+        get.set(getv);
+        msg.set("Loaded — review and propose.".into());
+    };
+
     view! {
         <Show when=can_trade fallback=|| view! {
             <div class="card"><p class="empty">"Trades are closed right now (past the in-season deadline). Come back next offseason or earlier next season."</p></div>
         }>
+            <div class="card" style="margin-bottom:1.25rem">
+                <div class="roster-head">
+                    <h3 class="card-title">"Trade Finder"</h3>
+                    <select class="input" on:change=move |e| shop.set(event_target_value(&e).parse().ok())>
+                        <option value="">"Shop a player\u{2026}"</option>
+                        {move || roster(user_id()).into_iter().map(|(id, name, _pos, ovr, _sal, _val)| view! {
+                            <option value=id.to_string()>{format!("{} ({})", name, ovr)}</option>
+                        }).collect_view()}
+                    </select>
+                </div>
+                {move || {
+                    let sugg = suggestions();
+                    if shop.get().is_none() {
+                        view! { <p class="hint">"Pick one of your players to see what the league would give up for him."</p> }.into_any()
+                    } else if sugg.is_empty() {
+                        view! { <p class="empty">"No team bit on that one. Try a more valuable player."</p> }.into_any()
+                    } else {
+                        view! {
+                            <div class="finder-list">
+                                {sugg.into_iter().map(move |(o, team, who, getv)| {
+                                    let shop_pid = shop.get().unwrap();
+                                    let getv2 = getv.clone();
+                                    view! {
+                                        <div class="finder-row">
+                                            <span class="finder-team">{team}</span>
+                                            <span class="finder-get">"gives "{who}</span>
+                                            <button class="mini-btn draft" on:click=move |_| load(o, vec![shop_pid], getv2.clone())>"Load"</button>
+                                        </div>
+                                    }
+                                }).collect_view()}
+                            </div>
+                        }.into_any()
+                    }
+                }}
+            </div>
+
             <div class="card">
                 <div class="roster-head">
                     <h3 class="card-title">"Trade"</h3>

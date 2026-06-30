@@ -15,6 +15,7 @@ pub fn FreeAgencyScreen() -> impl IntoView {
     let cap_room = move || league.with(|l| {
         l.user_team_id.map(|id| l.team_cap_space(id) as f64 / 1000.0).unwrap_or(0.0)
     });
+    let offers = move || league.with(|l| l.fa_offer_count());
     let log = move || league.with(|l| l.free_agency.as_ref().map(|f| f.log.clone()).unwrap_or_default());
 
     let sim_round = move |_| state.update_league(|l| l.fa_sim_round());
@@ -29,7 +30,7 @@ pub fn FreeAgencyScreen() -> impl IntoView {
                 <div>
                     <h1 class="brand">"Free " <span class="brand-accent">"Agency"</span></h1>
                     <p class="subtitle">
-                        {move || format!("Round {} \u{2022} Cap room: ${:.1}M", round(), cap_room())}
+                        {move || format!("Round {} \u{2022} Cap room: ${:.1}M \u{2022} Offers {}/{}", round(), cap_room(), offers(), engine::League::FA_MAX_OFFERS)}
                     </p>
                 </div>
                 <div class="draft-actions">
@@ -52,6 +53,8 @@ pub fn FreeAgencyScreen() -> impl IntoView {
                     </div>
                 </div>
             </Show>
+
+            <crate::ui::MyRosterCard/>
         </div>
     }
 }
@@ -143,11 +146,16 @@ fn OfferPanel() -> impl IntoView {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Sort { Ovr, Pos, Age, Pot, Asking, Interest }
+
 #[component]
 fn FaPool() -> impl IntoView {
     let state = expect_context::<AppState>();
     let league = state.league;
     let sel = expect_context::<FaSelection>();
+    // (column, ascending)
+    let sort = RwSignal::new((Sort::Ovr, false));
 
     let pool = move || league.with(|l| {
         let Some(fa) = &l.free_agency else { return Vec::new() };
@@ -155,23 +163,59 @@ fn FaPool() -> impl IntoView {
         let mut v: Vec<_> = fa.pool.iter().filter_map(|pid| {
             let p = l.players.iter().find(|p| p.id == *pid)?;
             let offer = user.and_then(|u| fa.user_offer(*pid, u)).map(|o| o.salary);
-            Some((p.id, p.name.clone(), p.position.abbrev(), p.age, p.overall(), p.potential, engine::market_salary(p.overall()), offer))
+            let interest = l.fa_interest(*pid);
+            let irank = match interest {
+                engine::Interest::Eager => 4, engine::Interest::Interested => 3,
+                engine::Interest::Lukewarm => 2, engine::Interest::Unlikely => 1, engine::Interest::NoOffer => 0,
+            };
+            Some((p.id, p.name.clone(), p.position.abbrev(), p.age, p.overall(), p.potential,
+                  engine::market_salary(p.overall()), offer, interest.label(), irank))
         }).collect();
-        v.sort_by(|a, b| b.4.cmp(&a.4));
+        let (key, asc) = sort.get();
+        v.sort_by(|a, b| {
+            let o = match key {
+                Sort::Ovr => a.4.cmp(&b.4),
+                Sort::Pos => a.2.cmp(b.2),
+                Sort::Age => a.3.cmp(&b.3),
+                Sort::Pot => a.5.cmp(&b.5),
+                Sort::Asking => a.6.cmp(&b.6),
+                Sort::Interest => a.9.cmp(&b.9),
+            };
+            if asc { o } else { o.reverse() }
+        });
         v
     });
+
+    // Header that toggles sort on click.
+    let th = move |label: &'static str, key: Sort, left: bool| {
+        let cls = if left { "left sortable" } else { "sortable" };
+        view! {
+            <th class=cls on:click=move |_| sort.update(|(k, asc)| {
+                if *k == key { *asc = !*asc; } else { *k = key; *asc = matches!(key, Sort::Pos | Sort::Age | Sort::Asking); }
+            })>
+                {label}{move || if sort.get().0 == key { if sort.get().1 { " \u{25b2}" } else { " \u{25bc}" } } else { "" }}
+            </th>
+        }
+    };
 
     view! {
         <div class="card draft-prospects">
             <h3 class="card-title">"Free Agents"</h3>
             <table class="tbl">
                 <thead><tr>
-                    <th class="left">"Player"</th><th>"Pos"</th><th>"Age"</th><th>"OVR"</th><th>"POT"</th>
-                    <th>"Asking"</th><th>"Your Offer"</th>
+                    <th class="left">"Player"</th>
+                    {th("Pos", Sort::Pos, false)}
+                    {th("Age", Sort::Age, false)}
+                    {th("OVR", Sort::Ovr, false)}
+                    {th("POT", Sort::Pot, false)}
+                    {th("Asking", Sort::Asking, false)}
+                    <th>"Your Offer"</th>
+                    {th("Interest", Sort::Interest, false)}
                 </tr></thead>
                 <tbody>
-                    {move || pool().into_iter().map(move |(id, name, pos, age, ovr, pot, ask, offer)| {
+                    {move || pool().into_iter().map(move |(id, name, pos, age, ovr, pot, ask, offer, interest, irank)| {
                         let is_sel = move || sel.0.get() == Some(id);
+                        let icls = match irank { 4 | 3 => "int good", 2 => "int mid", 1 => "int bad", _ => "int" };
                         view! {
                             <tr class=move || if is_sel() { "row pickable sel" } else { "row pickable" }
                                 on:click=move |_| sel.0.set(Some(id))>
@@ -182,6 +226,7 @@ fn FaPool() -> impl IntoView {
                                 <td>{pot}</td>
                                 <td>{format!("${:.1}M", ask as f64 / 1000.0)}</td>
                                 <td>{offer.map(|s| format!("${:.1}M", s as f64 / 1000.0)).unwrap_or_else(|| "\u{2014}".into())}</td>
+                                <td><span class=icls>{interest}</span></td>
                             </tr>
                         }
                     }).collect_view()}

@@ -317,6 +317,22 @@ body {
 .fa-log-list { display: flex; flex-wrap: wrap; gap: .4rem; }
 .fa-log-item { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: .3rem .6rem; font-size: .82rem; }
 
+/* Sortable table headers */
+.tbl th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+.tbl th.sortable:hover { color: var(--text); }
+
+/* Free-agent interest */
+.int { font-weight: 700; font-size: .8rem; }
+.int.good { color: #2faa55; }
+.int.mid { color: #e6a23c; }
+.int.bad { color: #e0413a; }
+
+/* Trade finder */
+.finder-list { display: flex; flex-direction: column; gap: .4rem; margin-top: .5rem; }
+.finder-row { display: flex; align-items: center; gap: .6rem; padding: .45rem .6rem; background: var(--panel-2); border: 1px solid var(--border); border-radius: 9px; }
+.finder-team { font-weight: 700; min-width: 140px; }
+.finder-get { color: var(--muted); flex: 1; }
+
 /* Trades */
 .trade-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: .75rem 0; }
 @media (max-width: 800px) { .trade-cols { grid-template-columns: 1fr; } }

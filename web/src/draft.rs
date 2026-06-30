@@ -66,6 +66,8 @@ pub fn DraftScreen() -> impl IntoView {
                 <PickBoard/>
                 <ProspectBoard/>
             </div>
+
+            <crate::ui::MyRosterCard/>
         </div>
     }
 }
@@ -111,12 +113,16 @@ fn PickBoard() -> impl IntoView {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum DSort { Ovr, Pos, Age, Pot }
+
 #[component]
 fn ProspectBoard() -> impl IntoView {
     let state = expect_context::<AppState>();
     let league = state.league;
     let user_on = move || league.with(|l| l.is_user_on_clock());
     let scout_left = move || league.with(|l| l.draft.as_ref().map(|d| d.scout_points).unwrap_or(0));
+    let sort = RwSignal::new((DSort::Ovr, false));
 
     let prospects = move || {
         league.with(|l| {
@@ -128,22 +134,39 @@ fn ProspectBoard() -> impl IntoView {
                 .map(|p| {
                     let r = &p.ratings;
                     // Scouted potential = a fuzzy letter grade until drafted.
-                    let (grade, conf) = d
+                    let (grade, conf, est) = d
                         .scouting
                         .get(&p.id)
-                        .map(|s| (s.grade().to_string(), s.confidence()))
-                        .unwrap_or_else(|| ("?".into(), 0));
-                    (p.id, p.name.clone(), p.position.abbrev(), p.age, p.overall(), grade, conf,
+                        .map(|s| (s.grade().to_string(), s.confidence(), s.estimate))
+                        .unwrap_or_else(|| ("?".into(), 0, 0.0));
+                    (p.id, p.name.clone(), p.position.abbrev(), p.age, p.overall(), grade, conf, est,
                      r.three, r.layup, r.dunk, r.passing, r.ball_handling, r.rebounding, r.defense, r.athleticism)
                 })
                 .collect();
-            v.sort_by(|a, b| b.4.cmp(&a.4));
+            let (key, asc) = sort.get();
+            v.sort_by(|a, b| {
+                let o = match key {
+                    DSort::Ovr => a.4.cmp(&b.4),
+                    DSort::Pos => a.2.cmp(b.2),
+                    DSort::Age => a.3.cmp(&b.3),
+                    DSort::Pot => a.7.partial_cmp(&b.7).unwrap(),
+                };
+                if asc { o } else { o.reverse() }
+            });
             v
         })
     };
 
     let pick = move |pid: u32| state.update_league(move |l| l.draft_user_pick(pid));
     let scout = move |pid: u32| state.update_league(move |l| l.scout_prospect(pid));
+
+    let th = move |label: &'static str, key: DSort| view! {
+        <th class="sortable" on:click=move |_| sort.update(|(k, asc)| {
+            if *k == key { *asc = !*asc; } else { *k = key; *asc = matches!(key, DSort::Pos | DSort::Age); }
+        })>
+            {label}{move || if sort.get().0 == key { if sort.get().1 { " \u{25b2}" } else { " \u{25bc}" } } else { "" }}
+        </th>
+    };
 
     view! {
         <div class="card draft-prospects">
@@ -153,8 +176,8 @@ fn ProspectBoard() -> impl IntoView {
             </h3>
             <table class="tbl">
                 <thead><tr>
-                    <th class="left">"Prospect"</th><th>"Pos"</th><th>"Age"</th><th>"OVR"</th>
-                    <th title="Scouted potential">"POT"</th>
+                    <th class="left">"Prospect"</th>
+                    {th("Pos", DSort::Pos)}{th("Age", DSort::Age)}{th("OVR", DSort::Ovr)}{th("POT", DSort::Pot)}
                     <th>"3pt"</th><th>"Lay"</th><th>"Dnk"</th><th>"Pas"</th><th>"Hdl"</th>
                     <th>"Reb"</th><th>"Def"</th><th>"Ath"</th><th></th>
                 </tr></thead>
@@ -162,7 +185,7 @@ fn ProspectBoard() -> impl IntoView {
                     {move || {
                         let can_pick = user_on();
                         let can_scout = scout_left() > 0;
-                        prospects().into_iter().map(move |(id, name, pos, age, ovr, grade, conf, three, lay, dnk, pas, hdl, reb, def, ath)| {
+                        prospects().into_iter().map(move |(id, name, pos, age, ovr, grade, conf, _est, three, lay, dnk, pas, hdl, reb, def, ath)| {
                             let dots = "\u{25cf}".repeat(conf as usize) + &"\u{25cb}".repeat(3 - conf as usize);
                             view! {
                                 <tr class="row">

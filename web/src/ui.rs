@@ -19,6 +19,48 @@ pub fn ThemeToggle() -> impl IntoView {
     }
 }
 
+/// A compact view of the user's current roster, for the draft / FA screens.
+#[component]
+pub fn MyRosterCard() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let rows = move || state.league.with(|l| {
+        let Some(id) = l.user_team_id else { return (Vec::new(), 0.0, 0) };
+        let Some(team) = l.teams.iter().find(|t| t.id == id) else { return (Vec::new(), 0.0, 0) };
+        let mut ps: Vec<_> = team.roster.iter()
+            .filter_map(|pid| l.players.iter().find(|p| p.id == *pid))
+            .map(|p| (p.name.clone(), p.position.abbrev(), p.age, p.overall(), p.contract.salary_str()))
+            .collect();
+        ps.sort_by(|a, b| b.3.cmp(&a.3));
+        let space = l.team_cap_space(id) as f64 / 1000.0;
+        (ps, space, team.roster.len())
+    });
+
+    view! {
+        <div class="card" style="margin-top:1.25rem">
+            <div class="roster-head">
+                <h3 class="card-title">"My Roster"</h3>
+                {move || { let (_, space, n) = rows(); view! {
+                    <span class="cap-summary">
+                        <span>{format!("{} players", n)}</span>
+                        <span class=if space < 0.0 { "cap-over" } else { "cap-room" }>
+                            {format!("{} ${:.1}M", if space < 0.0 { "Over by" } else { "Room:" }, space.abs())}
+                        </span>
+                    </span>
+                }}}
+            </div>
+            <table class="tbl">
+                <thead><tr><th class="left">"Player"</th><th>"Pos"</th><th>"Age"</th><th>"OVR"</th><th>"Salary"</th></tr></thead>
+                <tbody>
+                    {move || rows().0.into_iter().map(|(name, pos, age, ovr, sal)| view! {
+                        <tr class="row"><td class="left">{name}</td><td>{pos}</td><td>{age}</td>
+                            <td><span class="ovr">{ovr}</span></td><td>{sal}</td></tr>
+                    }).collect_view()}
+                </tbody>
+            </table>
+        </div>
+    }
+}
+
 /// Format a win-loss record's percentage like ".634".
 pub fn fmt_pct(pct: f64) -> String {
     let s = format!("{:.3}", pct);
