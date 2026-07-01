@@ -9,46 +9,106 @@
 use crate::types::{PlayerId, Position, TeamId};
 use serde::{Deserialize, Serialize};
 
-/// A player's skill attributes, each 0–100.
+/// A player's skill attributes, each 0–100. Granular on purpose: the possession
+/// simulator reads these individually so every one carries real weight. Grouped
+/// (in display and in the composite helpers) into inside scoring, outside
+/// shooting, playmaking, defense, and physicals.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ratings {
+    // --- Inside scoring ---
     /// Finishing at the rim off drives / floaters.
     pub layup: u8,
     /// Finishing above the rim; rewards athleticism on drives.
     pub dunk: u8,
+    /// Back-to-the-basket post scoring (bigs).
+    pub post: u8,
+    // --- Outside shooting ---
+    /// Mid-range jumper.
+    pub mid_range: u8,
     /// Three-point shooting.
     pub three: u8,
+    /// Free-throw accuracy.
+    pub free_throw: u8,
+    // --- Playmaking ---
     /// Passing — drives assist creation and assist accuracy.
     pub passing: u8,
     /// Ball handling — beating defenders off the dribble; reduces turnovers.
     pub ball_handling: u8,
+    /// Decision-making; reduces turnovers and sharpens shot selection/assists.
+    pub basketball_iq: u8,
+    // --- Defense ---
+    /// Rim protection and defending inside shots.
+    pub interior_defense: u8,
+    /// On-ball perimeter defense; contests jumpers and drives.
+    pub perimeter_defense: u8,
+    /// Creating steals.
+    pub steal: u8,
+    /// Blocking shots.
+    pub block: u8,
+    /// Grabbing rebounds on both glasses.
     pub rebounding: u8,
-    pub defense: u8,
+    // --- Physicals ---
     /// Speed / strength / leaping; aids drives, finishing, steals, blocks.
     pub athleticism: u8,
+    /// Endurance; carries a bigger minutes load without fading.
+    pub stamina: u8,
 }
 
 impl Ratings {
     /// A single 0–100 summary used for sorting and roster strength. Weighted
     /// toward the attributes that move the needle most in the sim.
     pub fn overall(&self) -> u8 {
-        let s = self.layup as f64 * 1.0
-            + self.dunk as f64 * 0.7
+        let s = self.layup as f64 * 0.9
+            + self.dunk as f64 * 0.6
+            + self.post as f64 * 0.5
+            + self.mid_range as f64 * 0.8
             + self.three as f64 * 1.1
-            + self.passing as f64 * 0.9
-            + self.ball_handling as f64 * 0.9
-            + self.rebounding as f64 * 0.8
-            + self.defense as f64 * 1.2
-            + self.athleticism as f64 * 0.8;
-        const W: f64 = 1.0 + 0.7 + 1.1 + 0.9 + 0.9 + 0.8 + 1.2 + 0.8;
+            + self.free_throw as f64 * 0.3
+            + self.passing as f64 * 0.85
+            + self.ball_handling as f64 * 0.85
+            + self.basketball_iq as f64 * 0.7
+            + self.interior_defense as f64 * 0.8
+            + self.perimeter_defense as f64 * 0.9
+            + self.steal as f64 * 0.5
+            + self.block as f64 * 0.5
+            + self.rebounding as f64 * 0.7
+            + self.athleticism as f64 * 0.7
+            + self.stamina as f64 * 0.3;
+        // Sum of the weights above.
+        const W: f64 = 11.0;
         (s / W).round() as u8
     }
 
     /// Composite scoring punch — used to weight how often a player is used on
     /// offense (his "usage").
     pub fn scoring(&self) -> f64 {
-        (self.layup as f64 + self.dunk as f64 + self.three as f64) / 3.0
-            + self.ball_handling as f64 * 0.25
+        (self.layup as f64 + self.dunk as f64 + self.post as f64 + self.mid_range as f64 + self.three as f64) / 5.0
+            + self.ball_handling as f64 * 0.18
+    }
+
+    fn avg(vals: &[u8]) -> u8 {
+        (vals.iter().map(|v| *v as u32).sum::<u32>() as f64 / vals.len() as f64).round() as u8
+    }
+
+    /// Inside-scoring composite (layup / dunk / post).
+    pub fn inside(&self) -> u8 {
+        Self::avg(&[self.layup, self.dunk, self.post])
+    }
+    /// Outside-shooting composite (mid-range / three / free throw).
+    pub fn outside(&self) -> u8 {
+        Self::avg(&[self.mid_range, self.three, self.free_throw])
+    }
+    /// Playmaking composite (passing / handle / IQ).
+    pub fn playmaking(&self) -> u8 {
+        Self::avg(&[self.passing, self.ball_handling, self.basketball_iq])
+    }
+    /// Defense composite (interior / perimeter / steal / block / rebounding).
+    pub fn defending(&self) -> u8 {
+        Self::avg(&[self.interior_defense, self.perimeter_defense, self.steal, self.block, self.rebounding])
+    }
+    /// Physical composite (athleticism / stamina).
+    pub fn athletic(&self) -> u8 {
+        Self::avg(&[self.athleticism, self.stamina])
     }
 }
 
@@ -159,5 +219,99 @@ impl SeasonStats {
     }
     pub fn tp_pct(&self) -> f64 {
         if self.tpa == 0 { 0.0 } else { self.tpm as f64 / self.tpa as f64 }
+    }
+
+    /// Add another season's totals into these (for career totals).
+    pub fn add(&mut self, o: &SeasonStats) {
+        self.gp += o.gp;
+        self.min += o.min;
+        self.pts += o.pts;
+        self.fgm += o.fgm;
+        self.fga += o.fga;
+        self.tpm += o.tpm;
+        self.tpa += o.tpa;
+        self.ftm += o.ftm;
+        self.fta += o.fta;
+        self.oreb += o.oreb;
+        self.dreb += o.dreb;
+        self.ast += o.ast;
+        self.stl += o.stl;
+        self.blk += o.blk;
+        self.tov += o.tov;
+    }
+}
+
+/// An honor a player earned in a given season, for the career/accomplishments
+/// view. Accumulates over a career (e.g. "3× Champion").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Honor {
+    Mvp,
+    Dpoy,
+    Roy,
+    FinalsMvp,
+    Champion,
+}
+
+impl Honor {
+    /// Full name, e.g. "Most Valuable Player".
+    pub fn label(&self) -> &'static str {
+        match self {
+            Honor::Mvp => "Most Valuable Player",
+            Honor::Dpoy => "Defensive Player of the Year",
+            Honor::Roy => "Rookie of the Year",
+            Honor::FinalsMvp => "Finals MVP",
+            Honor::Champion => "Champion",
+        }
+    }
+    /// Short tag, e.g. "MVP".
+    pub fn short(&self) -> &'static str {
+        match self {
+            Honor::Mvp => "MVP",
+            Honor::Dpoy => "DPOY",
+            Honor::Roy => "ROY",
+            Honor::FinalsMvp => "Finals MVP",
+            Honor::Champion => "Champion",
+        }
+    }
+}
+
+/// An honor tagged with the season it was won.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct HonorEntry {
+    pub season: u32,
+    pub honor: Honor,
+}
+
+/// One completed season in a player's career log.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CareerSeason {
+    pub season: u32,
+    pub team_abbrev: String,
+    pub age: u8,
+    /// The player's overall at the end of that season.
+    pub overall: u8,
+    pub stats: SeasonStats,
+}
+
+/// A player's accumulated career: season-by-season log plus honors won.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Career {
+    pub seasons: Vec<CareerSeason>,
+    pub honors: Vec<HonorEntry>,
+}
+
+impl Career {
+    /// Summed totals across every recorded season.
+    pub fn totals(&self) -> SeasonStats {
+        let mut t = SeasonStats::default();
+        for cs in &self.seasons {
+            t.add(&cs.stats);
+        }
+        t
+    }
+
+    /// How many times a given honor was won.
+    pub fn count(&self, honor: Honor) -> usize {
+        self.honors.iter().filter(|h| h.honor == honor).count()
     }
 }

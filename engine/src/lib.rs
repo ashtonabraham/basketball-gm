@@ -23,7 +23,7 @@ pub use league::{
     market_salary, Awards, Interest, League, OwnerMessage, OwnerTone, Phase, PlayoffOutcome,
     SeasonHistory, SeasonRecap, TradeEval, TradeSuggestion, MIN_SALARY, SALARY_CAP,
 };
-pub use player::{Contract, Player, Ratings, SeasonStats};
+pub use player::{Career, CareerSeason, Contract, Honor, HonorEntry, Player, Ratings, SeasonStats};
 pub use playoffs::{Playoffs, Series, ROUND_NAMES};
 pub use schedule::{Game, GameResult};
 pub use sim::{simulate_game, simulate_game_pbp, GameSim, PlayEvent, PlayerLine, TeamBox};

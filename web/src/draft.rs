@@ -140,7 +140,7 @@ fn ProspectBoard() -> impl IntoView {
                         .map(|s| (s.grade().to_string(), s.confidence(), s.estimate))
                         .unwrap_or_else(|| ("?".into(), 0, 0.0));
                     (p.id, p.name.clone(), p.position.abbrev(), p.age, p.overall(), grade, conf, est,
-                     r.three, r.layup, r.dunk, r.passing, r.ball_handling, r.rebounding, r.defense, r.athleticism)
+                     r.inside(), r.outside(), r.playmaking(), r.defending(), r.athletic())
                 })
                 .collect();
             let (key, asc) = sort.get();
@@ -178,14 +178,14 @@ fn ProspectBoard() -> impl IntoView {
                 <thead><tr>
                     <th class="left">"Prospect"</th>
                     {th("Pos", DSort::Pos)}{th("Age", DSort::Age)}{th("OVR", DSort::Ovr)}{th("POT", DSort::Pot)}
-                    <th>"3pt"</th><th>"Lay"</th><th>"Dnk"</th><th>"Pas"</th><th>"Hdl"</th>
-                    <th>"Reb"</th><th>"Def"</th><th>"Ath"</th><th></th>
+                    <th title="Inside scoring">"INS"</th><th title="Outside shooting">"OUT"</th>
+                    <th title="Playmaking">"PLM"</th><th title="Defense">"DEF"</th><th title="Physical">"ATH"</th><th></th>
                 </tr></thead>
                 <tbody>
                     {move || {
                         let can_pick = user_on();
                         let can_scout = scout_left() > 0;
-                        prospects().into_iter().map(move |(id, name, pos, age, ovr, grade, conf, _est, three, lay, dnk, pas, hdl, reb, def, ath)| {
+                        prospects().into_iter().map(move |(id, name, pos, age, ovr, grade, conf, _est, ins, out, plm, def, ath)| {
                             let dots = "\u{25cf}".repeat(conf as usize) + &"\u{25cb}".repeat(3 - conf as usize);
                             view! {
                                 <tr class="row">
@@ -197,9 +197,7 @@ fn ProspectBoard() -> impl IntoView {
                                         <span class="grade">{grade}</span>
                                         <span class="conf" title="Scouting confidence">{dots}</span>
                                     </td>
-                                    <td>{three}</td><td>{lay}</td><td>{dnk}</td>
-                                    <td>{pas}</td><td>{hdl}</td>
-                                    <td>{reb}</td><td>{def}</td><td>{ath}</td>
+                                    <td>{ins}</td><td>{out}</td><td>{plm}</td><td>{def}</td><td>{ath}</td>
                                     <td class="prospect-actions">
                                         <Show when=move || can_scout && conf < 3>
                                             <button class="mini-btn" title="Spend a scouting point" on:click=move |_| scout(id)>"Scout"</button>

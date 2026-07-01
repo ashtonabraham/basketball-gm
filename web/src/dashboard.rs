@@ -392,13 +392,12 @@ fn RosterPanel() -> impl IntoView {
                 .filter_map(|pid| l.players.iter().find(|p| p.id == *pid))
                 .map(|p| {
                     let r = &p.ratings;
-                    (p.name.clone(), p.position.abbrev(), p.age, p.overall(), p.potential,
+                    (p.id, p.name.clone(), p.position.abbrev(), p.age, p.overall(), p.potential,
                      p.contract.salary_str(), p.contract.years,
-                     r.layup, r.dunk, r.three, r.passing, r.ball_handling,
-                     r.rebounding, r.defense, r.athleticism)
+                     r.inside(), r.outside(), r.playmaking(), r.defending(), r.athletic())
                 })
                 .collect();
-            ps.sort_by(|a, b| b.3.cmp(&a.3));
+            ps.sort_by(|a, b| b.4.cmp(&a.4));
             ps
         })
     };
@@ -432,23 +431,20 @@ fn RosterPanel() -> impl IntoView {
                     <th class="left">"Player"</th><th>"Pos"</th><th>"Age"</th><th>"OVR"</th>
                     <th title="Potential (peak overall)">"POT"</th>
                     <th title="Salary">"Salary"</th><th title="Years left">"Yrs"</th>
-                    <th title="Layup">"Lay"</th><th title="Dunk">"Dnk"</th><th title="Three-point">"3pt"</th>
-                    <th title="Passing">"Pas"</th><th title="Ball handling">"Hdl"</th>
-                    <th title="Rebounding">"Reb"</th><th title="Defense">"Def"</th><th title="Athleticism">"Ath"</th>
+                    <th title="Inside scoring">"INS"</th><th title="Outside shooting">"OUT"</th>
+                    <th title="Playmaking">"PLM"</th><th title="Defense">"DEF"</th><th title="Physical">"ATH"</th>
                 </tr></thead>
                 <tbody>
-                    {move || players().into_iter().map(|(name, pos, age, ovr, pot, salary, years, lay, dnk, three, pas, hdl, reb, def, ath)| {
+                    {move || players().into_iter().map(|(id, name, pos, age, ovr, pot, salary, years, ins, out, plm, def, ath)| {
                         view! {
                             <tr class="row">
-                                <td class="left">{name}</td>
+                                <td class="left"><crate::ui::PlayerLink id=id name=name/></td>
                                 <td>{pos}</td>
                                 <td>{age}</td>
                                 <td><span class="ovr">{ovr}</span></td>
                                 <td>{pot}</td>
                                 <td>{salary}</td><td>{years}</td>
-                                <td>{lay}</td><td>{dnk}</td><td>{three}</td>
-                                <td>{pas}</td><td>{hdl}</td>
-                                <td>{reb}</td><td>{def}</td><td>{ath}</td>
+                                <td>{ins}</td><td>{out}</td><td>{plm}</td><td>{def}</td><td>{ath}</td>
                             </tr>
                         }
                     }).collect_view()}
@@ -870,10 +866,10 @@ fn StatsPanel() -> impl IntoView {
                 .filter_map(|pid| l.players.iter().find(|p| p.id == *pid))
                 .map(|p| {
                     let s = &l.season_stats[p.id as usize];
-                    (p.name.clone(), p.position.abbrev(), s.gp, s.mpg(), s.ppg(), s.rpg(), s.apg(), s.fg_pct(), s.tp_pct())
+                    (p.id, p.name.clone(), p.position.abbrev(), s.gp, s.mpg(), s.ppg(), s.rpg(), s.apg(), s.fg_pct(), s.tp_pct())
                 })
                 .collect();
-            rows.sort_by(|a, b| b.4.partial_cmp(&a.4).unwrap());
+            rows.sort_by(|a, b| b.5.partial_cmp(&a.5).unwrap());
             rows
         })
     };
@@ -888,10 +884,10 @@ fn StatsPanel() -> impl IntoView {
                 .map(|p| {
                     let s = &l.season_stats[p.id as usize];
                     let team = p.team.and_then(|tid| l.teams.iter().find(|t| t.id == tid)).map(|t| t.abbrev.clone()).unwrap_or_default();
-                    (p.name.clone(), team, s.ppg())
+                    (p.id, p.name.clone(), team, s.ppg())
                 })
                 .collect();
-            rows.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
+            rows.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap());
             rows.truncate(10);
             rows
         })
@@ -913,9 +909,9 @@ fn StatsPanel() -> impl IntoView {
                             <th>"PPG"</th><th>"RPG"</th><th>"APG"</th><th>"FG%"</th><th>"3P%"</th>
                         </tr></thead>
                         <tbody>
-                            {move || team_rows().into_iter().map(|(name, pos, gp, mpg, ppg, rpg, apg, fg, tp)| view! {
+                            {move || team_rows().into_iter().map(|(id, name, pos, gp, mpg, ppg, rpg, apg, fg, tp)| view! {
                                 <tr class="row">
-                                    <td class="left">{name}</td><td>{pos}</td><td>{gp}</td>
+                                    <td class="left"><crate::ui::PlayerLink id=id name=name/></td><td>{pos}</td><td>{gp}</td>
                                     <td>{format!("{:.1}", mpg)}</td>
                                     <td><b>{format!("{:.1}", ppg)}</b></td>
                                     <td>{format!("{:.1}", rpg)}</td>
@@ -932,10 +928,10 @@ fn StatsPanel() -> impl IntoView {
                     <table class="tbl">
                         <thead><tr><th>"#"</th><th class="left">"Player"</th><th>"Team"</th><th>"PPG"</th></tr></thead>
                         <tbody>
-                            {move || leaders().into_iter().enumerate().map(|(i, (name, team, ppg))| view! {
+                            {move || leaders().into_iter().enumerate().map(|(i, (id, name, team, ppg))| view! {
                                 <tr class="row">
                                     <td>{i + 1}</td>
-                                    <td class="left">{name}</td>
+                                    <td class="left"><crate::ui::PlayerLink id=id name=name/></td>
                                     <td>{team}</td>
                                     <td><b>{format!("{:.1}", ppg)}</b></td>
                                 </tr>

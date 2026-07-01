@@ -6,13 +6,14 @@
 //! and whether it falls, is driven by that player's individual attributes
 //! versus the defense:
 //!
-//!   * `ball_handling` + `athleticism` help a player beat his man on a drive,
-//!     raising his finish chance and lowering turnovers.
-//!   * `three` governs how often he shoots from deep and how often it falls.
-//!   * `layup` / `dunk` govern interior finishing (dunk for high-flyers).
-//!   * `passing` decides who collects assists.
+//!   * `ball_handling` + `basketball_iq` reduce turnovers; ball pressure raises them.
+//!   * `three` / `mid_range` govern the jumper game, contested by perimeter D.
+//!   * `layup` / `dunk` / `post` govern interior finishing, contested by interior D.
+//!   * `free_throw` sets the line accuracy.
+//!   * `passing` + `basketball_iq` decide who collects assists.
 //!   * `rebounding` decides who grabs misses (and second-chance points).
-//!   * `defense` + `athleticism` suppress opponents and earn steals/blocks.
+//!   * `steal` / `perimeter_defense` earn steals; `block` / `interior_defense` earn blocks.
+//!   * `stamina` shifts a player's share of the 240 team minutes.
 //!
 //! The output is a full per-player box score, so attributes flow all the way
 //! through to individual stats and the final score.
@@ -68,12 +69,14 @@ impl GameSim {
 struct Rotation<'a> {
     players: Vec<&'a Player>,
     lines: Vec<PlayerLine>,
-    usage: Vec<f64>,      // share of offensive possessions
-    reb_weight: Vec<f64>, // share of rebounds
-    ast_weight: Vec<f64>, // share of assists
-    def_weight: Vec<f64>, // share of steals/blocks
-    team_defense: f64,    // minutes-weighted defense rating
-    team_reb: f64,        // minutes-weighted rebounding rating
+    usage: Vec<f64>,        // share of offensive possessions
+    reb_weight: Vec<f64>,   // share of rebounds
+    ast_weight: Vec<f64>,   // share of assists
+    steal_weight: Vec<f64>, // share of steals
+    block_weight: Vec<f64>, // share of blocks
+    team_int_def: f64,      // minutes-weighted interior defense
+    team_perim_def: f64,    // minutes-weighted perimeter defense
+    team_reb: f64,          // minutes-weighted rebounding rating
 }
 
 impl<'a> Rotation<'a> {
@@ -87,28 +90,46 @@ impl<'a> Rotation<'a> {
         roster.truncate(9); // top 9 play
 
         // Minutes follow a realistic rotation template (best players first),
-        // normalized to 240 team-minutes (5 men × 48). Using a template rather
-        // than a power of overall keeps any one player from being handed an
-        // impossible workload when a roster has a big talent gap.
+        // then get nudged by stamina (high-endurance players carry a bit more of
+        // the load), and are renormalized to 240 team-minutes (5 men × 48). Using
+        // a template rather than a power of overall keeps any one player from
+        // being handed an impossible workload when a roster has a big talent gap.
         const TEMPLATE: [f64; 9] = [38.0, 36.0, 34.0, 32.0, 30.0, 22.0, 18.0, 16.0, 14.0];
-        let raw: Vec<f64> = (0..roster.len()).map(|i| TEMPLATE[i.min(8)]).collect();
+        let raw: Vec<f64> = roster
+            .iter()
+            .enumerate()
+            .map(|(i, p)| TEMPLATE[i.min(8)] * (1.0 + (p.ratings.stamina as f64 - 65.0) / 300.0))
+            .collect();
         let raw_sum: f64 = raw.iter().sum::<f64>().max(1.0);
         let minutes: Vec<f64> = raw
             .iter()
-            .map(|m| (m * 240.0 / raw_sum).min(42.0))
+            .map(|m| (m * 240.0 / raw_sum).min(40.0))
             .collect();
 
-        let usage = roster.iter().zip(&minutes).map(|(p, m)| m * p.ratings.scoring()).collect();
+        // Usage leans on scoring but is compressed (the `* 0.72 + 22` floor) so
+        // even a big talent gap doesn't let one star swallow the whole offense.
+        let usage = roster.iter().zip(&minutes).map(|(p, m)| m * (p.ratings.scoring() * 0.72 + 22.0)).collect();
         let reb_weight = roster.iter().zip(&minutes).map(|(p, m)| m * p.ratings.rebounding as f64).collect();
-        let ast_weight = roster.iter().zip(&minutes).map(|(p, m)| m * p.ratings.passing as f64).collect();
-        let def_weight = roster
+        let ast_weight = roster
             .iter()
             .zip(&minutes)
-            .map(|(p, m)| m * (p.ratings.defense as f64 + p.ratings.athleticism as f64))
+            .map(|(p, m)| m * (p.ratings.passing as f64 * 0.75 + p.ratings.basketball_iq as f64 * 0.25))
+            .collect();
+        let steal_weight = roster
+            .iter()
+            .zip(&minutes)
+            .map(|(p, m)| m * (p.ratings.steal as f64 + p.ratings.perimeter_defense as f64 * 0.4 + p.ratings.athleticism as f64 * 0.3))
+            .collect();
+        let block_weight = roster
+            .iter()
+            .zip(&minutes)
+            .map(|(p, m)| m * (p.ratings.block as f64 + p.ratings.interior_defense as f64 * 0.4))
             .collect();
 
-        let team_defense = roster.iter().zip(&minutes).map(|(p, m)| m * p.ratings.defense as f64).sum::<f64>() / 240.0;
-        let team_reb = roster.iter().zip(&minutes).map(|(p, m)| m * p.ratings.rebounding as f64).sum::<f64>() / 240.0;
+        let mwavg = |f: &dyn Fn(&Player) -> f64| roster.iter().zip(&minutes).map(|(p, m)| m * f(p)).sum::<f64>() / 240.0;
+        let team_int_def = mwavg(&|p| p.ratings.interior_defense as f64);
+        let team_perim_def = mwavg(&|p| p.ratings.perimeter_defense as f64);
+        let team_reb = mwavg(&|p| p.ratings.rebounding as f64);
 
         let lines = roster
             .iter()
@@ -116,7 +137,7 @@ impl<'a> Rotation<'a> {
             .map(|(p, m)| PlayerLine { player_id: p.id, min: m.round() as u32, ..Default::default() })
             .collect();
 
-        Rotation { players: roster, lines, usage, reb_weight, ast_weight, def_weight, team_defense, team_reb }
+        Rotation { players: roster, lines, usage, reb_weight, ast_weight, steal_weight, block_weight, team_int_def, team_perim_def, team_reb }
     }
 }
 
@@ -168,6 +189,8 @@ pub struct PlayEvent {
 #[derive(Clone, Copy)]
 enum PlayKind {
     Three,
+    MidRange,
+    Post,
     Layup,
     Dunk,
     FreeThrows,
@@ -200,7 +223,7 @@ fn run_game(home: &Team, away: &Team, players: &[Player], rng: &mut impl Rng, re
     let mut h = Rotation::build(home, players);
     let mut a = Rotation::build(away, players);
 
-    let possessions = rng.gen_range(98..=106);
+    let possessions = rng.gen_range(100..=108);
     let total = possessions * 2;
     let secs_per = 2880.0 / total as f64; // 48:00 spread across all possessions
     let mut events = Vec::new();
@@ -260,6 +283,8 @@ fn make_event(h: &Rotation, a: &Rotation, home_id: TeamId, away_id: TeamId, off_
 
     let mut text = match o.kind {
         PlayKind::Three => format!("{shooter} drains a three"),
+        PlayKind::MidRange => format!("{shooter} knocks down the mid-range"),
+        PlayKind::Post => format!("{shooter} scores on the block"),
         PlayKind::Dunk => format!("{shooter} throws it down"),
         PlayKind::Layup => format!("{shooter} finishes at the rim"),
         PlayKind::FreeThrows => format!("{shooter} hits {} at the line", o.points),
@@ -326,47 +351,64 @@ fn resolve_possession(
 ) -> PossOutcome {
     let shooter = weighted_pick(&off.usage, rng);
     let r = off.players[shooter].ratings.clone();
-    let def_rating = def.team_defense;
+    let def_int = def.team_int_def;
+    let def_perim = def.team_perim_def;
 
-    // --- Turnover: poor handle + tough defense force giveaways. ---
-    let p_tov = (0.135 - (r.ball_handling as f64 - 50.0) * 0.0016 + (def_rating - 50.0) * 0.0016)
+    // --- Turnover: poor handle / low IQ and ball pressure force giveaways. ---
+    let p_tov = (0.135 - (r.ball_handling as f64 - 50.0) * 0.0013 - (r.basketball_iq as f64 - 50.0) * 0.0009
+        + (def_perim - 50.0) * 0.0016)
         .clamp(0.04, 0.30);
     if rng.gen::<f64>() < p_tov {
         off.lines[shooter].tov += 1;
         let mut defender = None;
         if rng.gen::<f64>() < 0.5 {
-            let d = weighted_pick(&def.def_weight, rng);
+            let d = weighted_pick(&def.steal_weight, rng);
             def.lines[d].stl += 1;
             defender = Some(d);
         }
         return PossOutcome { shooter, points: 0, kind: PlayKind::Turnover, and_one: false, assist: None, defender };
     }
 
-    // --- Shot selection: three vs drive. ---
-    let three_tendency = (0.12 + (r.three as f64 - 48.0) * 0.006).clamp(0.05, 0.62);
+    // --- Shot selection: three, mid-range jumper, or an attack inside. ---
+    let three_tendency = (0.12 + (r.three as f64 - 48.0) * 0.006).clamp(0.05, 0.55);
     let is_three = rng.gen::<f64>() < three_tendency;
+    let is_mid = !is_three && {
+        let mid_tendency = (0.28 + (r.mid_range as f64 - 55.0) * 0.006).clamp(0.10, 0.55);
+        rng.gen::<f64>() < mid_tendency
+    };
 
     off.lines[shooter].fga += 1;
     let (made, points, assist_chance, kind) = if is_three {
         off.lines[shooter].tpa += 1;
-        // Elite shooters land ~40% from deep; league ~35%.
-        let p = (0.335 + (r.three as f64 - 55.0) * 0.004 - (def_rating - 50.0) * 0.0035 + home_edge)
+        // Elite shooters land ~40% from deep; league ~35%. Contested by the
+        // defense's perimeter D.
+        let p = (0.335 + (r.three as f64 - 55.0) * 0.004 - (def_perim - 50.0) * 0.0035 + home_edge)
             .clamp(0.18, 0.46);
         let made = rng.gen::<f64>() < p;
         if made {
             off.lines[shooter].tpm += 1;
         }
         (made, 3u32, 0.82, PlayKind::Three)
+    } else if is_mid {
+        // Mid-range two, contested on the perimeter.
+        let p = (0.40 + (r.mid_range as f64 - 55.0) * 0.004 - (def_perim - 50.0) * 0.003 + home_edge)
+            .clamp(0.25, 0.55);
+        (rng.gen::<f64>() < p, 2u32, 0.45, PlayKind::MidRange)
+    } else if r.post >= 60 && r.post > r.ball_handling && rng.gen::<f64>() < 0.5 {
+        // Post-up: back-to-the-basket scoring, contested by interior D.
+        let p = (0.50 + (r.post as f64 - 60.0) * 0.0028 - (def_int - 50.0) * 0.0035 + home_edge)
+            .clamp(0.22, 0.72);
+        (rng.gen::<f64>() < p, 2u32, 0.40, PlayKind::Post)
     } else {
-        // Drive: ball handling + athleticism vs defense decides the look, and
-        // whether it finishes as a dunk or a layup.
-        let drive_adv = (r.ball_handling as f64 + r.athleticism as f64) / 2.0 - def_rating;
+        // Drive: ball handling + athleticism vs perimeter D decides the look,
+        // and whether it finishes as a dunk or a layup over the interior D.
+        let drive_adv = (r.ball_handling as f64 + r.athleticism as f64) / 2.0 - def_perim;
         let can_dunk = r.dunk >= 68 && r.athleticism >= 64 && drive_adv > -8.0;
         let dunk = can_dunk && rng.gen::<f64>() < 0.40;
         let finish = if dunk { r.dunk } else { r.layup } as f64;
         // Dunks convert high; layups are around the low-50s for good finishers.
         let base = if dunk { 0.68 } else { 0.52 };
-        let p = (base + (finish - 60.0) * 0.0028 + drive_adv * 0.0028 - (def_rating - 50.0) * 0.0035 + home_edge)
+        let p = (base + (finish - 60.0) * 0.0028 + drive_adv * 0.0028 - (def_int - 50.0) * 0.0035 + home_edge)
             .clamp(0.20, 0.76);
         (rng.gen::<f64>() < p, 2u32, 0.55, if dunk { PlayKind::Dunk } else { PlayKind::Layup })
     };
@@ -381,20 +423,23 @@ fn resolve_possession(
             assist = Some(passer);
         }
         let mut and_one = false;
-        if points == 2 && rng.gen::<f64>() < 0.07 {
+        if matches!(kind, PlayKind::Layup | PlayKind::Dunk | PlayKind::Post) && rng.gen::<f64>() < 0.09 {
             and_one = free_throws(off, shooter, 1, rng) > 0;
         }
         return PossOutcome { shooter, points, kind, and_one, assist, defender: None };
     }
 
+    // Inside finishes (drives / post) draw fouls and get blocked; jumpers rarely do.
+    let is_inside = matches!(kind, PlayKind::Layup | PlayKind::Dunk | PlayKind::Post);
+
     // --- Miss: shooting foul, block, then the rebound battle. ---
-    if points == 2 && rng.gen::<f64>() < 0.08 {
+    if is_inside && rng.gen::<f64>() < 0.10 {
         let m = free_throws(off, shooter, 2, rng); // fouled in the act
         return PossOutcome { shooter, points: m, kind: PlayKind::FreeThrows, and_one: false, assist: None, defender: None };
     }
     let mut blocker = None;
-    if points == 2 && rng.gen::<f64>() < 0.06 {
-        let b = weighted_pick(&def.def_weight, rng);
+    if is_inside && rng.gen::<f64>() < 0.06 {
+        let b = weighted_pick(&def.block_weight, rng);
         def.lines[b].blk += 1;
         blocker = Some(b);
     }
@@ -412,10 +457,14 @@ fn resolve_possession(
 }
 
 fn free_throws(off: &mut Rotation, shooter: usize, n: u32, rng: &mut impl Rng) -> u32 {
+    // Free-throw accuracy tracks the shooter's rating: ~60% for a poor shooter,
+    // ~90% for an elite one, league around 77%.
+    let ft = off.players[shooter].ratings.free_throw as f64;
+    let p = (0.50 + (ft - 50.0) * 0.006).clamp(0.40, 0.95);
     let mut made = 0;
     for _ in 0..n {
         off.lines[shooter].fta += 1;
-        if rng.gen::<f64>() < 0.77 {
+        if rng.gen::<f64>() < p {
             off.lines[shooter].ftm += 1;
             off.lines[shooter].pts += 1;
             made += 1;

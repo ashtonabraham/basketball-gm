@@ -6,7 +6,7 @@
 use crate::draft::{Draft, DraftPick, ScoutEntry};
 use crate::free_agency::{FaOffer, FreeAgency};
 use crate::names::{FIRST_NAMES, LAST_NAMES};
-use crate::player::{Contract, Player, Ratings, SeasonStats};
+use crate::player::{Career, CareerSeason, Contract, Honor, HonorEntry, Player, Ratings, SeasonStats};
 use crate::playoffs::{first_round_pairs, high_seed_hosts, Playoffs, Series};
 use crate::schedule::{generate_schedule, Game, GameResult};
 use crate::sim::{simulate_game, simulate_game_pbp, PlayEvent, TeamBox};
@@ -19,30 +19,42 @@ use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Generate a player's 8 attributes from a team talent baseline and the
-/// position's identity (e.g. centers dunk and rebound; guards handle and pass).
+/// Generate a player's 16 attributes from a team talent baseline and the
+/// position's identity (e.g. centers dunk, post, block and rebound; guards
+/// handle, pass and shoot).
 fn gen_ratings(pos: Position, talent: f64, rng: &mut impl Rng) -> Ratings {
     let base = talent + rng.gen_range(-12.0..14.0);
     let attr = |modifier: f64, rng: &mut dyn rand::RngCore| -> u8 {
         (base + modifier + rng.gen_range(-8.0..8.0)).clamp(25.0, 99.0) as u8
     };
-    // (layup, dunk, three, passing, ball_handling, rebounding, defense, athleticism)
-    let m = match pos {
-        Position::PG => (-2.0, -10.0, 6.0, 12.0, 12.0, -10.0, 0.0, 6.0),
-        Position::SG => (0.0, -4.0, 10.0, 2.0, 6.0, -6.0, 0.0, 5.0),
-        Position::SF => (3.0, 2.0, 2.0, 0.0, 0.0, 0.0, 2.0, 3.0),
-        Position::PF => (5.0, 8.0, -4.0, -4.0, -6.0, 8.0, 3.0, 0.0),
-        Position::C => (6.0, 12.0, -10.0, -6.0, -10.0, 12.0, 5.0, -2.0),
+    // Per-position modifiers, in field order:
+    // layup, dunk, post, mid_range, three, free_throw, passing, ball_handling,
+    // basketball_iq, interior_defense, perimeter_defense, steal, block,
+    // rebounding, athleticism, stamina
+    let m: [f64; 16] = match pos {
+        Position::PG => [-2., -12., -16., 3., 6., 6., 12., 14., 8., -12., 6., 8., -14., -12., 6., 4.],
+        Position::SG => [0., -4., -10., 8., 10., 6., 2., 6., 4., -6., 6., 5., -8., -6., 5., 2.],
+        Position::SF => [3., 2., 0., 4., 2., 2., 0., 0., 2., 2., 4., 3., 0., 0., 3., 0.],
+        Position::PF => [5., 8., 8., -2., -4., -2., -4., -6., 0., 6., -2., -2., 6., 8., 0., 0.],
+        Position::C => [6., 12., 12., -8., -12., -6., -6., -10., 0., 10., -6., -4., 12., 12., -2., -2.],
     };
     Ratings {
-        layup: attr(m.0, rng),
-        dunk: attr(m.1, rng),
-        three: attr(m.2, rng),
-        passing: attr(m.3, rng),
-        ball_handling: attr(m.4, rng),
-        rebounding: attr(m.5, rng),
-        defense: attr(m.6, rng),
-        athleticism: attr(m.7, rng),
+        layup: attr(m[0], rng),
+        dunk: attr(m[1], rng),
+        post: attr(m[2], rng),
+        mid_range: attr(m[3], rng),
+        three: attr(m[4], rng),
+        free_throw: attr(m[5], rng),
+        passing: attr(m[6], rng),
+        ball_handling: attr(m[7], rng),
+        basketball_iq: attr(m[8], rng),
+        interior_defense: attr(m[9], rng),
+        perimeter_defense: attr(m[10], rng),
+        steal: attr(m[11], rng),
+        block: attr(m[12], rng),
+        rebounding: attr(m[13], rng),
+        athleticism: attr(m[14], rng),
+        stamina: attr(m[15], rng),
     }
 }
 
@@ -94,12 +106,20 @@ fn apply_attr_delta(r: &mut Ratings, d: i32, rng: &mut impl Rng) {
     };
     bump(&mut r.layup, rng);
     bump(&mut r.dunk, rng);
+    bump(&mut r.post, rng);
+    bump(&mut r.mid_range, rng);
     bump(&mut r.three, rng);
+    bump(&mut r.free_throw, rng);
     bump(&mut r.passing, rng);
     bump(&mut r.ball_handling, rng);
+    bump(&mut r.basketball_iq, rng);
+    bump(&mut r.interior_defense, rng);
+    bump(&mut r.perimeter_defense, rng);
+    bump(&mut r.steal, rng);
+    bump(&mut r.block, rng);
     bump(&mut r.rebounding, rng);
-    bump(&mut r.defense, rng);
     bump(&mut r.athleticism, rng);
+    bump(&mut r.stamina, rng);
 }
 
 /// One offseason of development: young players grow toward their potential,
@@ -279,6 +299,9 @@ pub struct League {
     pub awards: Option<Awards>,
     /// The owner's message after the most recently completed season.
     pub owner_message: Option<OwnerMessage>,
+    /// Per-player career logs (season-by-season stats + honors), keyed by id.
+    #[serde(default)]
+    pub careers: HashMap<PlayerId, Career>,
     seed: u64,
     next_player_id: PlayerId,
 }
@@ -302,6 +325,7 @@ impl League {
             free_agency: None,
             awards: None,
             owner_message: None,
+            careers: HashMap::new(),
             seed,
             next_player_id: 0,
         };
@@ -899,7 +923,7 @@ impl League {
                 let s = &self.season_stats[p.id as usize];
                 let stl = s.stl as f64 / s.gp.max(1) as f64;
                 let blk = s.blk as f64 / s.gp.max(1) as f64;
-                let score = stl * 3.0 + blk * 3.0 + s.rpg() * 0.7 + p.ratings.defense as f64 * 0.15;
+                let score = stl * 3.0 + blk * 3.0 + s.rpg() * 0.7 + p.ratings.defending() as f64 * 0.15;
                 (p.id, score)
             })
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
@@ -1116,9 +1140,64 @@ impl League {
                 });
             }
         }
+        // Log this season into every player's career (stat line + honors), so
+        // player detail views can show accomplishments over time.
+        self.record_careers();
+
         // Tick down contracts; expiring players hit the free-agent pool.
         self.process_contracts();
         self.phase = Phase::Offseason;
+    }
+
+    /// Append this season's stat line and any honors won to each player's career
+    /// log. Called once per season, at `finish_season`, after awards are set.
+    fn record_careers(&mut self) {
+        let season = self.season;
+        let awards = self.awards.clone().unwrap_or_default();
+        let champ = self.playoffs.as_ref().and_then(|p| p.champion);
+        let fmvp = self.playoffs.as_ref().and_then(|p| p.finals_mvp);
+        let abbrevs: HashMap<TeamId, String> =
+            self.teams.iter().map(|t| (t.id, t.abbrev.clone())).collect();
+
+        // Gather updates under immutable borrows, then apply them.
+        let mut updates: Vec<(PlayerId, Option<CareerSeason>, Vec<Honor>)> = Vec::new();
+        for p in &self.players {
+            let st = &self.season_stats[p.id as usize];
+            let mut honors = Vec::new();
+            if awards.mvp == Some(p.id) { honors.push(Honor::Mvp); }
+            if awards.dpoy == Some(p.id) { honors.push(Honor::Dpoy); }
+            if awards.roy == Some(p.id) { honors.push(Honor::Roy); }
+            if fmvp == Some(p.id) { honors.push(Honor::FinalsMvp); }
+            if champ.is_some() && p.team == champ { honors.push(Honor::Champion); }
+            let season_row = if st.gp > 0 {
+                Some(CareerSeason {
+                    season,
+                    team_abbrev: p.team.and_then(|t| abbrevs.get(&t).cloned()).unwrap_or_default(),
+                    age: p.age,
+                    overall: p.overall(),
+                    stats: st.clone(),
+                })
+            } else {
+                None
+            };
+            if season_row.is_some() || !honors.is_empty() {
+                updates.push((p.id, season_row, honors));
+            }
+        }
+        for (pid, row, honors) in updates {
+            let c = self.careers.entry(pid).or_default();
+            if let Some(row) = row {
+                c.seasons.push(row);
+            }
+            for honor in honors {
+                c.honors.push(HonorEntry { season, honor });
+            }
+        }
+    }
+
+    /// A player's career log, if they have any recorded seasons or honors.
+    pub fn career(&self, pid: PlayerId) -> Option<&Career> {
+        self.careers.get(&pid)
     }
 
     // ---- Draft ----

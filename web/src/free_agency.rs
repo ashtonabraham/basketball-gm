@@ -219,7 +219,7 @@ fn FaPool() -> impl IntoView {
                         view! {
                             <tr class=move || if is_sel() { "row pickable sel" } else { "row pickable" }
                                 on:click=move |_| sel.0.set(Some(id))>
-                                <td class="left">{name}</td>
+                                <td class="left"><crate::ui::PlayerLink id=id name=name/></td>
                                 <td>{pos}</td>
                                 <td>{age}</td>
                                 <td><span class="ovr">{ovr}</span></td>

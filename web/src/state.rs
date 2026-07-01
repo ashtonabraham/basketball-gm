@@ -1,6 +1,6 @@
 //! Shared app state, theme, and browser persistence.
 
-use engine::League;
+use engine::{League, PlayerId};
 use leptos::prelude::*;
 
 const SAVE_KEY: &str = "hardwood_gm_save";
@@ -26,6 +26,8 @@ pub struct AppState {
     pub tab: RwSignal<Tab>,
     /// Schedule index of the game being watched in the simcast, if any.
     pub watching: RwSignal<Option<usize>>,
+    /// Id of the player whose detail modal is open, if any.
+    pub viewing: RwSignal<Option<PlayerId>>,
 }
 
 impl AppState {

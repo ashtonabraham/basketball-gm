@@ -438,3 +438,74 @@ body {
 .stat-num { font-size: 1.3rem; font-weight: 800; }
 .stat-lbl { color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; }
 .recap-line { color: var(--text); margin: .35rem 0; }
+
+/* ---- Clickable player names ---- */
+.plink { color: var(--accent); cursor: pointer; font-weight: 700; }
+.plink:hover { text-decoration: underline; }
+
+/* ---- Player detail modal ---- */
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 60;
+  background: rgba(0,0,0,.62); backdrop-filter: blur(2px);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 3.5rem 1rem; overflow-y: auto;
+}
+.modal-card {
+  position: relative; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 20px; box-shadow: var(--shadow); width: 100%;
+}
+.player-modal { max-width: 760px; padding: 1.75rem; }
+.modal-close {
+  position: absolute; top: .9rem; right: .9rem; width: 32px; height: 32px;
+  border-radius: 9px; border: 1px solid var(--border); background: var(--panel-2);
+  color: var(--muted); cursor: pointer; font-size: .9rem; line-height: 1;
+}
+.modal-close:hover { background: var(--row-hover); color: var(--text); }
+
+.pm-head { display: flex; align-items: center; gap: 1.1rem; padding-right: 2rem; }
+.pm-ovr {
+  flex: 0 0 auto; width: 64px; height: 64px; border-radius: 16px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.7rem; font-weight: 900; color: #fff;
+  background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 55%, #000));
+}
+.pm-name { margin: 0; font-size: 1.5rem; }
+.pm-meta { color: var(--muted); font-size: .9rem; margin-top: .1rem; }
+.pm-sub { display: flex; gap: 1.1rem; margin-top: .35rem; font-size: .85rem; color: var(--muted); }
+.pm-sub b { color: var(--text); }
+
+.pm-honors { display: flex; flex-wrap: wrap; gap: .4rem; margin: 1rem 0 .25rem; }
+.honor-badge {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--text); font-weight: 800; font-size: .74rem;
+  padding: .28rem .6rem; border-radius: 999px;
+}
+
+.pm-body { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-top: 1.25rem; }
+@media (max-width: 680px) { .pm-body { grid-template-columns: 1fr; } }
+
+.rt-group { margin-bottom: 1rem; }
+.rt-group-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  border-bottom: 1px solid var(--border); padding-bottom: .25rem; margin-bottom: .45rem;
+}
+.rt-group-name { font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 800; }
+.rt-group-grade { font-weight: 900; font-size: .95rem; }
+.rt-row { display: grid; grid-template-columns: 84px 1fr 28px; align-items: center; gap: .5rem; margin: .28rem 0; }
+.rt-label { font-size: .78rem; color: var(--muted); }
+.rt-track { height: 8px; border-radius: 999px; background: var(--panel-2); overflow: hidden; }
+.rt-fill {
+  display: block; height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 65%, #000), var(--accent));
+}
+.rt-val { font-weight: 800; font-size: .82rem; text-align: right; }
+
+.pm-section { margin: 0 0 .5rem; font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.pm-season-now { margin-bottom: 1.1rem; }
+.statline { display: flex; flex-wrap: wrap; gap: .5rem 1rem; font-size: .85rem; }
+.statline b { font-size: 1rem; }
+.statline .dim { color: var(--muted); }
+.pm-career { font-size: .8rem; }
+.pm-career th, .pm-career td { padding: .3rem .35rem; }
+.pm-totals td { font-weight: 800; border-top: 2px solid var(--border); color: var(--text); }

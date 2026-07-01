@@ -24,7 +24,8 @@ pub fn App() -> impl IntoView {
     let dark = RwSignal::new(load_theme());
     let tab = RwSignal::new(Tab::Standings);
     let watching = RwSignal::new(None::<usize>);
-    let state = AppState { league, dark, tab, watching };
+    let viewing = RwSignal::new(None::<engine::PlayerId>);
+    let state = AppState { league, dark, tab, watching, viewing };
     provide_context(state);
 
     // Persist theme whenever it changes.
@@ -58,6 +59,7 @@ pub fn App() -> impl IntoView {
                 Phase::FreeAgency => view! { <crate::free_agency::FreeAgencyScreen/> }.into_any(),
                 _ => view! { <Dashboard/> }.into_any(),
             }}
+            <crate::player_modal::PlayerModal/>
         </div>
     }
 }

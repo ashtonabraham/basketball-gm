@@ -1,7 +1,21 @@
 //! Small shared UI pieces.
 
 use crate::state::AppState;
+use engine::PlayerId;
 use leptos::prelude::*;
+
+/// A player's name rendered as a clickable link that opens the detail modal.
+/// Stops propagation so it works inside rows that have their own click handler.
+#[component]
+pub fn PlayerLink(id: PlayerId, name: String) -> impl IntoView {
+    let state = expect_context::<AppState>();
+    view! {
+        <span class="plink" on:click=move |e| {
+            e.stop_propagation();
+            state.viewing.set(Some(id));
+        }>{name}</span>
+    }
+}
 
 /// Sun/moon button that flips between dark and light themes.
 #[component]
@@ -28,9 +42,9 @@ pub fn MyRosterCard() -> impl IntoView {
         let Some(team) = l.teams.iter().find(|t| t.id == id) else { return (Vec::new(), 0.0, 0) };
         let mut ps: Vec<_> = team.roster.iter()
             .filter_map(|pid| l.players.iter().find(|p| p.id == *pid))
-            .map(|p| (p.name.clone(), p.position.abbrev(), p.age, p.overall(), p.contract.salary_str()))
+            .map(|p| (p.id, p.name.clone(), p.position.abbrev(), p.age, p.overall(), p.contract.salary_str()))
             .collect();
-        ps.sort_by(|a, b| b.3.cmp(&a.3));
+        ps.sort_by(|a, b| b.4.cmp(&a.4));
         let space = l.team_cap_space(id) as f64 / 1000.0;
         (ps, space, team.roster.len())
     });
@@ -51,8 +65,8 @@ pub fn MyRosterCard() -> impl IntoView {
             <table class="tbl">
                 <thead><tr><th class="left">"Player"</th><th>"Pos"</th><th>"Age"</th><th>"OVR"</th><th>"Salary"</th></tr></thead>
                 <tbody>
-                    {move || rows().0.into_iter().map(|(name, pos, age, ovr, sal)| view! {
-                        <tr class="row"><td class="left">{name}</td><td>{pos}</td><td>{age}</td>
+                    {move || rows().0.into_iter().map(|(id, name, pos, age, ovr, sal)| view! {
+                        <tr class="row"><td class="left"><PlayerLink id=id name=name/></td><td>{pos}</td><td>{age}</td>
                             <td><span class="ovr">{ovr}</span></td><td>{sal}</td></tr>
                     }).collect_view()}
                 </tbody>
