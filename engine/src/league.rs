@@ -124,17 +124,20 @@ fn apply_attr_delta(r: &mut Ratings, d: i32, rng: &mut impl Rng) {
 
 /// One offseason of development: young players grow toward their potential,
 /// veterans decline. Called after ages are incremented.
-fn develop_player(p: &mut Player, rng: &mut impl Rng) {
+/// `dev_factor` (~0.8..1.35) comes from the player's team's coaching + training
+/// budgets: it scales up growth and softens decline.
+fn develop_player(p: &mut Player, rng: &mut impl Rng, dev_factor: f64) {
     let ovr = p.overall();
     if p.age <= 26 && ovr < p.potential {
         let room = (p.potential - ovr) as f64;
-        let gain = (room * rng.gen_range(0.20..0.50)).round() as i32;
+        let gain = (room * rng.gen_range(0.20..0.50) * dev_factor).round() as i32;
         let gain = gain.max(1).min((p.potential - ovr) as i32);
         apply_attr_delta(&mut p.ratings, gain, rng);
     } else if p.age >= 31 {
         let severity = (p.age as i32 - 30).max(0);
-        let loss = (rng.gen_range(1.0..3.0) + severity as f64 * 0.4).round() as i32;
-        apply_attr_delta(&mut p.ratings, -loss, rng);
+        // More training (higher factor) slows the decline.
+        let loss = ((rng.gen_range(1.0..3.0) + severity as f64 * 0.4) * (2.0 - dev_factor)).round() as i32;
+        apply_attr_delta(&mut p.ratings, -loss.max(0), rng);
     }
 }
 
@@ -191,6 +194,50 @@ pub struct TradeSuggestion {
     pub get: Vec<PlayerId>,
     pub get_value: f64,
     pub message: String,
+}
+
+/// A tradeable future draft pick. `season` is the draft year it conveys in,
+/// `original` is the team whose slot it is (drives its value), and `owner` is
+/// who currently holds it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnedPick {
+    pub id: u32,
+    pub season: u32,
+    pub round: u8,
+    pub original: TeamId,
+    pub owner: TeamId,
+}
+
+/// A concrete trade package surfaced by the 2K-style trade finder: exactly what
+/// each side gives up (players + picks) and the value math.
+#[derive(Debug, Clone)]
+pub struct TradePackage {
+    pub other: TeamId,
+    pub give_players: Vec<PlayerId>,
+    pub give_picks: Vec<u32>,
+    pub get_players: Vec<PlayerId>,
+    pub get_picks: Vec<u32>,
+    pub give_value: f64,
+    pub get_value: f64,
+}
+
+/// A team's projected/booked season profit-and-loss (all money in thousands).
+#[derive(Debug, Clone)]
+pub struct FinanceProjection {
+    pub capacity: u32,
+    /// Average attendance per home game.
+    pub attendance: u32,
+    pub ticket_rev: u32,
+    pub concession_rev: u32,
+    pub tv_rev: u32,
+    pub revenue: u32,
+    pub payroll: u32,
+    /// Sum of the four department budgets.
+    pub budgets: u32,
+    pub expenses: u32,
+    /// The owner's soft budget ceiling for the season.
+    pub budget: u32,
+    pub profit: i64,
 }
 
 /// The result of evaluating a proposed trade (for previewing in the UI).
@@ -302,6 +349,11 @@ pub struct League {
     /// Per-player career logs (season-by-season stats + honors), keyed by id.
     #[serde(default)]
     pub careers: HashMap<PlayerId, Career>,
+    /// Tradeable future draft picks (a rolling window of the next few drafts).
+    #[serde(default)]
+    pub pick_assets: Vec<OwnedPick>,
+    #[serde(default)]
+    next_pick_id: u32,
     seed: u64,
     next_player_id: PlayerId,
 }
@@ -326,6 +378,8 @@ impl League {
             awards: None,
             owner_message: None,
             careers: HashMap::new(),
+            pick_assets: Vec::new(),
+            next_pick_id: 0,
             seed,
             next_player_id: 0,
         };
@@ -343,6 +397,8 @@ impl League {
                 roster: Vec::new(),
                 wins: 0,
                 losses: 0,
+                market: 1.0,
+                finances: crate::team::Finances::default(),
             });
         }
 
@@ -354,9 +410,16 @@ impl League {
             let talent = rng.gen_range(38.0..64.0);
             league.generate_roster(*tid, talent, &mut rng);
         }
+        // Give each team a market size (drives arena capacity + TV money).
+        for t in &mut league.teams {
+            t.market = rng.gen_range(0.80..1.30);
+        }
 
         // Size the season-stats table to match the generated players.
         league.season_stats = vec![SeasonStats::default(); league.players.len()];
+
+        // Seed the rolling window of tradeable future draft picks.
+        league.ensure_pick_assets();
 
         // Build the schedule.
         let mut sched_rng = StdRng::seed_from_u64(seed ^ 0x5C4ED_u64);
@@ -1140,6 +1203,9 @@ impl League {
                 });
             }
         }
+        // Book the season's finances and refresh fan happiness.
+        self.commit_finances();
+
         // Log this season into every player's career (stat line + honors), so
         // player detail views can show accomplishments over time.
         self.record_careers();
@@ -1244,19 +1310,29 @@ impl League {
         // Keep the season-stats table sized to the player list.
         self.season_stats.resize(self.players.len(), SeasonStats::default());
 
-        // --- Draft order ---
+        // --- Draft order --- (traded picks convey to their current owner)
         let order = self.draft_order(&mut rng);
         let mut picks = Vec::with_capacity(64);
         for round in 1..=2u8 {
             for (i, &team_id) in order.iter().enumerate() {
+                // Who actually holds this slot's pick this year?
+                let owner = self
+                    .pick_assets
+                    .iter()
+                    .find(|pk| pk.season == self.season && pk.round == round && pk.original == team_id)
+                    .map(|pk| pk.owner)
+                    .unwrap_or(team_id);
                 picks.push(DraftPick {
                     round,
                     overall: ((round as usize - 1) * 32 + i + 1) as u8,
-                    team_id,
+                    team_id: owner,
                     player_id: None,
                 });
             }
         }
+        // This draft's pick assets are now spent.
+        let drafted_season = self.season;
+        self.pick_assets.retain(|pk| pk.season != drafted_season);
 
         // Initial (fuzzy) scouting read on every prospect.
         let mut scouting = HashMap::new();
@@ -1472,28 +1548,44 @@ impl League {
         post_payroll <= SALARY_CAP as i64 || incoming as f64 <= outgoing as f64 * 1.25 + 1_000.0
     }
 
-    /// Evaluate (without executing) a proposed trade: the user sends `give` and
-    /// receives `get` from `other`.
+    /// Evaluate (without executing) a player-only proposed trade.
     pub fn evaluate_trade(&self, other: TeamId, give: &[PlayerId], get: &[PlayerId]) -> TradeEval {
+        self.evaluate_trade_full(other, give, &[], get, &[])
+    }
+
+    /// Evaluate a proposed trade including draft picks: the user sends
+    /// `give_players` + `give_picks` and receives `get_players` + `get_picks`.
+    pub fn evaluate_trade_full(
+        &self,
+        other: TeamId,
+        give_players: &[PlayerId],
+        give_picks: &[u32],
+        get_players: &[PlayerId],
+        get_picks: &[u32],
+    ) -> TradeEval {
+        let give = give_players;
+        let get = get_players;
+        let give_pick_val: f64 = give_picks.iter().filter_map(|id| self.pick_by_id(*id)).map(|pk| self.pick_value(pk)).sum();
+        let get_pick_val: f64 = get_picks.iter().filter_map(|id| self.pick_by_id(*id)).map(|pk| self.pick_value(pk)).sum();
         let mut eval = TradeEval {
             legal: false,
             accepted: false,
             give_salary: self.sum_salary(give),
             get_salary: self.sum_salary(get),
-            give_value: self.sum_value(give),
-            get_value: self.sum_value(get),
+            give_value: self.sum_value(give) + give_pick_val,
+            get_value: self.sum_value(get) + get_pick_val,
             message: String::new(),
         };
         let Some(user) = self.user_team_id else {
             eval.message = "No team selected.".into();
             return eval;
         };
-        if give.is_empty() && get.is_empty() {
-            eval.message = "Add players to both sides.".into();
+        if give.is_empty() && get.is_empty() && give_picks.is_empty() && get_picks.is_empty() {
+            eval.message = "Add assets to both sides.".into();
             return eval;
         }
 
-        // Roster sizes after the swap.
+        // Roster sizes after the swap (picks don't count against the roster).
         let user_size = self.roster_len(user) as i64 - give.len() as i64 + get.len() as i64;
         let other_size = self.roster_len(other) as i64 - get.len() as i64 + give.len() as i64;
         if user_size > Self::ROSTER_MAX as i64 || other_size > Self::ROSTER_MAX as i64 {
@@ -1560,39 +1652,356 @@ impl League {
         out
     }
 
-    /// Execute the trade if it is legal and the CPU accepts. Returns success.
+    /// Execute a player-only trade if legal and accepted.
     pub fn execute_trade(&mut self, other: TeamId, give: &[PlayerId], get: &[PlayerId]) -> bool {
+        self.execute_trade_full(other, give, &[], get, &[])
+    }
+
+    /// Execute a trade including draft picks if it is legal and the CPU accepts.
+    pub fn execute_trade_full(
+        &mut self,
+        other: TeamId,
+        give_players: &[PlayerId],
+        give_picks: &[u32],
+        get_players: &[PlayerId],
+        get_picks: &[u32],
+    ) -> bool {
         let Some(user) = self.user_team_id else { return false };
-        // Validate ownership.
-        let give_ok = give.iter().all(|pid| self.players.iter().any(|p| p.id == *pid && p.team == Some(user)));
-        let get_ok = get.iter().all(|pid| self.players.iter().any(|p| p.id == *pid && p.team == Some(other)));
-        if !give_ok || !get_ok {
+        // Validate player ownership.
+        let give_ok = give_players.iter().all(|pid| self.players.iter().any(|p| p.id == *pid && p.team == Some(user)));
+        let get_ok = get_players.iter().all(|pid| self.players.iter().any(|p| p.id == *pid && p.team == Some(other)));
+        // Validate pick ownership.
+        let gp_ok = give_picks.iter().all(|id| self.pick_by_id(*id).map(|pk| pk.owner == user).unwrap_or(false));
+        let rp_ok = get_picks.iter().all(|id| self.pick_by_id(*id).map(|pk| pk.owner == other).unwrap_or(false));
+        if !give_ok || !get_ok || !gp_ok || !rp_ok {
             return false;
         }
-        let eval = self.evaluate_trade(other, give, get);
+        let eval = self.evaluate_trade_full(other, give_players, give_picks, get_players, get_picks);
         if !eval.legal || !eval.accepted {
             return false;
         }
         // Move players.
-        for &pid in give {
+        for &pid in give_players {
             if let Some(p) = self.players.iter_mut().find(|p| p.id == pid) {
                 p.team = Some(other);
             }
         }
-        for &pid in get {
+        for &pid in get_players {
             if let Some(p) = self.players.iter_mut().find(|p| p.id == pid) {
                 p.team = Some(user);
             }
         }
         if let Some(t) = self.teams.iter_mut().find(|t| t.id == user) {
-            t.roster.retain(|x| !give.contains(x));
-            t.roster.extend(get.iter().copied());
+            t.roster.retain(|x| !give_players.contains(x));
+            t.roster.extend(get_players.iter().copied());
         }
         if let Some(t) = self.teams.iter_mut().find(|t| t.id == other) {
-            t.roster.retain(|x| !get.contains(x));
-            t.roster.extend(give.iter().copied());
+            t.roster.retain(|x| !get_players.contains(x));
+            t.roster.extend(give_players.iter().copied());
+        }
+        // Reassign picks.
+        for id in give_picks {
+            if let Some(pk) = self.pick_assets.iter_mut().find(|pk| pk.id == *id) {
+                pk.owner = other;
+            }
+        }
+        for id in get_picks {
+            if let Some(pk) = self.pick_assets.iter_mut().find(|pk| pk.id == *id) {
+                pk.owner = user;
+            }
         }
         true
+    }
+
+    // ---- Draft-pick assets ----
+
+    /// How many future drafts are tradeable at once (a rolling window).
+    const PICK_YEARS: u32 = 4;
+
+    fn pick_by_id(&self, id: u32) -> Option<&OwnedPick> {
+        self.pick_assets.iter().find(|pk| pk.id == id)
+    }
+
+    /// All picks currently owned by a team, soonest first.
+    pub fn picks_owned_by(&self, tid: TeamId) -> Vec<&OwnedPick> {
+        let mut v: Vec<&OwnedPick> = self.pick_assets.iter().filter(|pk| pk.owner == tid).collect();
+        v.sort_by(|a, b| a.season.cmp(&b.season).then(a.round.cmp(&b.round)));
+        v
+    }
+
+    /// A short label for a pick, e.g. "2027 1st (CIN)".
+    pub fn pick_label(&self, id: u32) -> String {
+        match self.pick_by_id(id) {
+            None => "pick".into(),
+            Some(pk) => {
+                let rd = if pk.round == 1 { "1st" } else { "2nd" };
+                let orig = self.teams.iter().find(|t| t.id == pk.original).map(|t| t.abbrev.clone()).unwrap_or_default();
+                format!("{} {} ({})", pk.season, rd, orig)
+            }
+        }
+    }
+
+    /// A draft pick's trade value, from the original team's projected strength
+    /// (weaker team → higher pick → more valuable) and how far out it is.
+    pub fn pick_value(&self, pk: &OwnedPick) -> f64 {
+        let strength = |tid: TeamId| self.teams.iter().find(|t| t.id == tid).map(|t| t.strength(&self.players)).unwrap_or(60.0);
+        let league_avg = self.teams.iter().map(|t| t.strength(&self.players)).sum::<f64>() / self.teams.len().max(1) as f64;
+        let badness = ((league_avg - strength(pk.original)) / 15.0).clamp(-1.0, 1.0);
+        let (base, swing, floor) = if pk.round == 1 { (520.0, 300.0, 170.0) } else { (110.0, 60.0, 30.0) };
+        let raw = base + swing * badness;
+        let years_out = pk.season.saturating_sub(self.season);
+        let discount = 1.0 / (1.0 + 0.10 * years_out as f64);
+        (raw * discount).max(floor)
+    }
+
+    /// Make sure every team owns its own 1st and 2nd for each draft in the
+    /// rolling window `[season ..= season + PICK_YEARS - 1]`. Never disturbs
+    /// picks that have been traded away.
+    fn ensure_pick_assets(&mut self) {
+        let team_ids: Vec<TeamId> = self.teams.iter().map(|t| t.id).collect();
+        // Drop any stale picks for drafts that already happened.
+        let season = self.season;
+        self.pick_assets.retain(|pk| pk.season >= season);
+        for yr in season..season + Self::PICK_YEARS {
+            for &tid in &team_ids {
+                for round in 1..=2u8 {
+                    let exists = self.pick_assets.iter().any(|pk| pk.season == yr && pk.round == round && pk.original == tid);
+                    if !exists {
+                        let id = self.next_pick_id;
+                        self.next_pick_id += 1;
+                        self.pick_assets.push(OwnedPick { id, season: yr, round, original: tid, owner: tid });
+                    }
+                }
+            }
+        }
+    }
+
+    /// 2K-style "acquire" finder: packages of YOUR assets that land the target
+    /// player from his team. Cheapest (best-value-for-you) first.
+    pub fn find_packages_to_acquire(&self, target: PlayerId) -> Vec<TradePackage> {
+        let Some(user) = self.user_team_id else { return Vec::new() };
+        let Some(tp) = self.players.iter().find(|p| p.id == target) else { return Vec::new() };
+        let Some(other) = tp.team else { return Vec::new() };
+        if other == user {
+            return Vec::new();
+        }
+
+        // Candidate assets we can send: our players (by value asc) + our picks.
+        let mut my_players: Vec<PlayerId> = self.teams.iter().find(|t| t.id == user).map(|t| t.roster.clone()).unwrap_or_default();
+        my_players.sort_by(|a, b| self.player_trade_value(*a).partial_cmp(&self.player_trade_value(*b)).unwrap());
+        let my_picks: Vec<u32> = self.picks_owned_by(user).iter().map(|pk| pk.id).collect();
+
+        let get = [target];
+        let mut out: Vec<TradePackage> = Vec::new();
+        let n = my_players.len();
+        // Try 1–3 players, optionally plus one pick as a sweetener.
+        for i in 0..n {
+            for j in i..n {
+                for k in j..n {
+                    let mut base: Vec<PlayerId> = vec![my_players[i]];
+                    if j != i { base.push(my_players[j]); }
+                    if k != j && k != i { base.push(my_players[k]); }
+                    base.sort_unstable();
+                    base.dedup();
+                    let pick_opts: Vec<Vec<u32>> = std::iter::once(vec![])
+                        .chain(my_picks.iter().map(|p| vec![*p]))
+                        .collect();
+                    for gp in &pick_opts {
+                        let e = self.evaluate_trade_full(other, &base, gp, &get, &[]);
+                        if e.legal && e.accepted {
+                            out.push(TradePackage {
+                                other,
+                                give_players: base.clone(),
+                                give_picks: gp.clone(),
+                                get_players: get.to_vec(),
+                                get_picks: vec![],
+                                give_value: e.give_value,
+                                get_value: e.get_value,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        // Cheapest legit package first; keep a spread.
+        out.sort_by(|a, b| a.give_value.partial_cmp(&b.give_value).unwrap());
+        out.truncate(6);
+        out
+    }
+
+    /// 2K-style "trade away" finder: for a player you shop, the best package each
+    /// other team would give up (players + picks). Best return first.
+    pub fn find_packages_to_trade_away(&self, shop: PlayerId) -> Vec<TradePackage> {
+        let Some(user) = self.user_team_id else { return Vec::new() };
+        if self.players.iter().find(|p| p.id == shop).and_then(|p| p.team) != Some(user) {
+            return Vec::new();
+        }
+        let give = [shop];
+        let mut out: Vec<TradePackage> = Vec::new();
+        for team in &self.teams {
+            if team.id == user {
+                continue;
+            }
+            // Their assets: top players by value + their picks.
+            let mut their: Vec<PlayerId> = team.roster.clone();
+            their.sort_by(|a, b| self.player_trade_value(*b).partial_cmp(&self.player_trade_value(*a)).unwrap());
+            their.truncate(10);
+            let their_picks: Vec<u32> = self.picks_owned_by(team.id).iter().map(|pk| pk.id).collect();
+
+            let mut best: Option<TradePackage> = None;
+            let m = their.len();
+            for i in 0..m {
+                for j in i..m {
+                    let mut base: Vec<PlayerId> = vec![their[i]];
+                    if j != i { base.push(their[j]); }
+                    let pick_opts: Vec<Vec<u32>> = std::iter::once(vec![])
+                        .chain(their_picks.iter().map(|p| vec![*p]))
+                        .collect();
+                    for rp in &pick_opts {
+                        let e = self.evaluate_trade_full(team.id, &give, &[], &base, rp);
+                        if e.legal && e.accepted {
+                            // Best = most value coming back to the user.
+                            if best.as_ref().map(|b| e.get_value > b.get_value).unwrap_or(true) {
+                                best = Some(TradePackage {
+                                    other: team.id,
+                                    give_players: give.to_vec(),
+                                    give_picks: vec![],
+                                    get_players: base.clone(),
+                                    get_picks: rp.clone(),
+                                    give_value: e.give_value,
+                                    get_value: e.get_value,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(b) = best {
+                out.push(b);
+            }
+        }
+        out.sort_by(|a, b| b.get_value.partial_cmp(&a.get_value).unwrap());
+        out.truncate(10);
+        out
+    }
+
+    // ---- Finances ----
+
+    /// Home games in a season (half of 82).
+    const HOME_GAMES: u32 = 41;
+
+    /// Development speedup from a team's coaching + training budgets (1.0 at the
+    /// default $16M combined; up to ~1.35 heavily funded, down to 0.8 gutted).
+    fn team_dev_factor(&self, tid: TeamId) -> f64 {
+        let Some(t) = self.teams.iter().find(|t| t.id == tid) else { return 1.0 };
+        let sum_m = (t.finances.coaching + t.finances.training) as f64 / 1000.0;
+        (1.0 + (sum_m - 16.0) * 0.02).clamp(0.8, 1.35)
+    }
+
+    /// A team's extra pull in free agency from nice facilities + happy fans.
+    fn team_fa_bonus(&self, tid: TeamId) -> f64 {
+        let Some(t) = self.teams.iter().find(|t| t.id == tid) else { return 0.0 };
+        let fac_m = t.finances.facilities as f64 / 1000.0;
+        (fac_m - 8.0) / 8.0 * 0.06 + t.finances.fan_happiness * 0.05
+    }
+
+    /// Compute the full P&L for a team given an assumed win pct (thousands).
+    fn finance_calc(&self, tid: TeamId, win_pct: f64) -> FinanceProjection {
+        let t = self.teams.iter().find(|t| t.id == tid).expect("team exists");
+        let f = &t.finances;
+        let cap = t.capacity();
+        let fac_m = f.facilities as f64 / 1000.0;
+        let fan_m = f.fan_interest as f64 / 1000.0;
+        let demand = (0.55
+            + (win_pct - 0.4) * 0.7
+            + f.fan_happiness * 0.12
+            + (fac_m - 8.0) / 8.0 * 0.05
+            + (fan_m - 6.0) / 6.0 * 0.08
+            - (f.ticket_price as f64 - 55.0) / 55.0 * 0.20)
+            .clamp(0.30, 1.0);
+        let attendance = (cap as f64 * demand) as u32;
+        let g = Self::HOME_GAMES as f64;
+        let gate = attendance as f64 * f.ticket_price as f64 * g / 1000.0;
+        // ~60% of fans buy concessions.
+        let conc = attendance as f64 * f.concession_price as f64 * 0.6 * g / 1000.0;
+        let tv = 80_000.0 + t.market * 30_000.0;
+        let revenue = (gate + conc + tv) as u32;
+        let payroll = self.team_payroll(tid);
+        let budgets = f.coaching + f.training + f.facilities + f.fan_interest;
+        let expenses = payroll + budgets;
+        let budget = revenue + 15_000 + (t.market * 15_000.0) as u32;
+        FinanceProjection {
+            capacity: cap,
+            attendance,
+            ticket_rev: gate as u32,
+            concession_rev: conc as u32,
+            tv_rev: tv as u32,
+            revenue,
+            payroll,
+            budgets,
+            expenses,
+            budget,
+            profit: revenue as i64 - expenses as i64,
+        }
+    }
+
+    /// Project a team's finances from its current record (0.5 if none yet).
+    pub fn project_finances(&self, tid: TeamId) -> FinanceProjection {
+        let wp = self
+            .teams
+            .iter()
+            .find(|t| t.id == tid)
+            .map(|t| if t.games_played() > 0 { t.win_pct() } else { 0.5 })
+            .unwrap_or(0.5);
+        self.finance_calc(tid, wp)
+    }
+
+    /// Update the user team's finance settings (prices + department budgets).
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_user_finances(&mut self, ticket: u32, concession: u32, coaching: u32, training: u32, facilities: u32, fan_interest: u32) {
+        let Some(user) = self.user_team_id else { return };
+        if let Some(t) = self.teams.iter_mut().find(|t| t.id == user) {
+            let f = &mut t.finances;
+            f.ticket_price = ticket.clamp(10, 300);
+            f.concession_price = concession.clamp(5, 100);
+            f.coaching = coaching.min(40_000);
+            f.training = training.min(40_000);
+            f.facilities = facilities.min(40_000);
+            f.fan_interest = fan_interest.min(40_000);
+        }
+    }
+
+    /// Book the finished season's finances for every team and refresh fan
+    /// happiness from how the year went.
+    fn commit_finances(&mut self) {
+        let playoff_teams: std::collections::HashSet<TeamId> =
+            playoff_seeds(&self.teams, Conference::East)
+                .into_iter()
+                .chain(playoff_seeds(&self.teams, Conference::West))
+                .collect();
+        let champ = self.playoffs.as_ref().and_then(|p| p.champion);
+
+        let rows: Vec<(TeamId, FinanceProjection, f64, bool, bool)> = self
+            .teams
+            .iter()
+            .map(|t| {
+                let wp = if t.games_played() > 0 { t.win_pct() } else { 0.5 };
+                (t.id, self.finance_calc(t.id, wp), wp, playoff_teams.contains(&t.id), champ == Some(t.id))
+            })
+            .collect();
+
+        for (tid, proj, wp, made_po, is_champ) in rows {
+            if let Some(t) = self.teams.iter_mut().find(|t| t.id == tid) {
+                let f = &mut t.finances;
+                f.last_attendance = proj.attendance;
+                f.last_revenue = proj.revenue;
+                f.last_expenses = proj.expenses;
+                f.last_profit = proj.profit;
+                let fan_m = f.fan_interest as f64 / 1000.0;
+                let bonus = if is_champ { 0.15 } else if made_po { 0.08 } else { 0.0 };
+                f.fan_happiness = (0.30 + wp * 0.45 + bonus + (fan_m - 6.0) / 6.0 * 0.05).clamp(0.05, 1.0);
+            }
+        }
     }
 
     // ---- Free agency ----
@@ -1616,18 +2025,31 @@ impl League {
         let Some(p) = self.players.iter().find(|p| p.id == pid) else { return Interest::NoOffer };
 
         let market = market_salary(p.overall()).max(MIN_SALARY) as f64;
-        let ratio = offer.salary as f64 / market; // how generous vs market
-        // Contender appeal: user strength vs league average.
+        // Star weight 0..1: the better the player, the more he chases winning
+        // over money (and the harder he is to simply outbid for).
+        let star = ((p.overall() as f64 - 70.0) / 25.0).clamp(0.0, 1.0);
         let league_avg = self.teams.iter().map(|t| t.strength(&self.players)).sum::<f64>() / self.teams.len() as f64;
         let user_strength = self.teams.iter().find(|t| t.id == user).map(|t| t.strength(&self.players)).unwrap_or(league_avg);
-        let appeal = (user_strength - league_avg) * 0.01; // ~±0.15
-        let years_bonus = (offer.years as f64 - 2.0) * 0.04;
-        let score = ratio + appeal + years_bonus;
+        let score = Self::fa_appeal(offer.salary, offer.years, market, star, user_strength, league_avg, self.team_fa_bonus(user));
 
-        if score >= 1.25 { Interest::Eager }
-        else if score >= 1.02 { Interest::Interested }
-        else if score >= 0.85 { Interest::Lukewarm }
+        if score >= 1.15 { Interest::Eager }
+        else if score >= 0.95 { Interest::Interested }
+        else if score >= 0.75 { Interest::Lukewarm }
         else { Interest::Unlikely }
+    }
+
+    /// How appealing an offer is to a free agent. Money has diminishing returns
+    /// (capped at 1.6× market), and matters less to stars; contention (team
+    /// strength vs league average) matters more to stars. `taste` is per-player
+    /// randomness the sim adds so the richest bid isn't automatic.
+    #[allow(clippy::too_many_arguments)]
+    fn fa_appeal(salary: u32, years: u8, market: f64, star: f64, team_strength: f64, league_avg: f64, taste: f64) -> f64 {
+        let ratio = (salary as f64 / market).min(1.6);
+        let money_appeal = ratio * (1.0 - 0.35 * star);
+        let str_norm = (team_strength - league_avg) / 20.0; // ~±0.5
+        let contention = str_norm * (0.4 + 1.2 * star);
+        let years_appeal = (years as f64 - 2.0) * 0.03;
+        money_appeal + contention + years_appeal + taste
     }
 
     /// Open the offseason free-agency period. The pool is every unsigned player
@@ -1696,6 +2118,7 @@ impl League {
         let pname: HashMap<PlayerId, String> = self.players.iter().map(|p| (p.id, p.name.clone())).collect();
         let abbrev: HashMap<TeamId, String> = self.teams.iter().map(|t| (t.id, t.abbrev.clone())).collect();
         let strength: HashMap<TeamId, f64> = self.teams.iter().map(|t| (t.id, t.strength(&self.players))).collect();
+        let fa_bonus: HashMap<TeamId, f64> = self.teams.iter().map(|t| (t.id, self.team_fa_bonus(t.id))).collect();
 
         let mut room: HashMap<TeamId, i32> = self.teams.iter().map(|t| (t.id, Self::ROSTER_MAX as i32 - t.roster.len() as i32)).collect();
         let mut space: HashMap<TeamId, i64> = self.teams.iter().map(|t| (t.id, self.team_cap_space(t.id))).collect();
@@ -1727,10 +2150,17 @@ impl League {
             }
         }
 
-        // Resolve: best FAs first pick the most appealing valid offer.
+        // Resolve: best FAs first pick the most appealing valid offer. Appeal is
+        // preference-based (money has diminishing returns; stars chase winning),
+        // so the richest bid doesn't automatically win — especially for stars.
+        let league_avg = strength.values().sum::<f64>() / strength.len().max(1) as f64;
         let mut rng = StdRng::seed_from_u64(self.seed ^ 0xFADE_u64 ^ round as u64);
         let mut signings: Vec<(PlayerId, FaOffer)> = Vec::new();
         for &pid in &pool_sorted {
+            let p_ovr = *ovr.get(&pid).unwrap_or(&50);
+            let market = market_salary(p_ovr).max(MIN_SALARY) as f64;
+            let star = ((p_ovr as f64 - 70.0) / 25.0).clamp(0.0, 1.0);
+
             let mut best: Option<FaOffer> = None;
             let mut best_u = f64::MIN;
             for (p, o) in offers.iter().filter(|(p, _)| *p == pid) {
@@ -1738,14 +2168,23 @@ impl League {
                 if room[&o.team] <= 0 || (o.salary as i64) > space[&o.team] {
                     continue;
                 }
-                let money = o.salary as f64 * o.years as f64;
-                let u = money + strength[&o.team] * 150.0 + rng.gen_range(0.0..3000.0);
+                // Per-(player,team) taste; stars have a wider, noisier market.
+                let taste = rng.gen_range(0.0..(0.15 + 0.5 * star)) + fa_bonus.get(&o.team).copied().unwrap_or(0.0);
+                let u = Self::fa_appeal(o.salary, o.years, market, star, strength[&o.team], league_avg, taste);
                 if u > best_u {
                     best_u = u;
                     best = Some(o.clone());
                 }
             }
             if let Some(o) = best {
+                // Stars may hold out early for a better fit rather than sign the
+                // first decent offer — signing them takes patience.
+                let holds_out = round <= 2 && star > 0.5 && rng.gen::<f64>() < 0.30 * star;
+                // A merely tolerable offer might not get signed yet either.
+                let too_cool = best_u < 0.7 && rng.gen::<f64>() < 0.5;
+                if holds_out || too_cool {
+                    continue;
+                }
                 *room.get_mut(&o.team).unwrap() -= 1;
                 *space.get_mut(&o.team).unwrap() -= o.salary as i64;
                 signings.push((pid, o));
@@ -1825,11 +2264,14 @@ impl League {
         self.season += 1;
         self.draft = None;
         self.free_agency = None;
-        // Age and develop every player (young grow toward potential, vets decline).
+        // Age and develop every player (young grow toward potential, vets
+        // decline). Each team's coaching/training budget speeds up its players.
+        let dev_factors: HashMap<TeamId, f64> = self.teams.iter().map(|t| (t.id, self.team_dev_factor(t.id))).collect();
         let mut dev_rng = StdRng::seed_from_u64(self.seed ^ 0xDE7_u64 ^ (self.season as u64));
         for p in &mut self.players {
             p.age = p.age.saturating_add(1);
-            develop_player(p, &mut dev_rng);
+            let factor = p.team.and_then(|t| dev_factors.get(&t).copied()).unwrap_or(1.0);
+            develop_player(p, &mut dev_rng, factor);
         }
         for t in &mut self.teams {
             t.wins = 0;
@@ -1837,6 +2279,8 @@ impl League {
         }
         self.season_stats = vec![SeasonStats::default(); self.players.len()];
         self.playoffs = None;
+        // Extend the tradeable-pick window to cover the new season's horizon.
+        self.ensure_pick_assets();
         let team_ids: Vec<TeamId> = self.teams.iter().map(|t| t.id).collect();
         let mut rng = StdRng::seed_from_u64(self.seed ^ 0x5C4ED_u64 ^ (self.season as u64));
         self.schedule = generate_schedule(&team_ids, &mut rng);

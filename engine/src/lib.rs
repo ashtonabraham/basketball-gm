@@ -20,15 +20,16 @@ pub mod types;
 pub use draft::{grade_for, Draft, DraftPick, ScoutEntry};
 pub use free_agency::{FaOffer, FreeAgency};
 pub use league::{
-    market_salary, Awards, Interest, League, OwnerMessage, OwnerTone, Phase, PlayoffOutcome,
-    SeasonHistory, SeasonRecap, TradeEval, TradeSuggestion, MIN_SALARY, SALARY_CAP,
+    market_salary, Awards, FinanceProjection, Interest, League, OwnedPick, OwnerMessage, OwnerTone,
+    Phase, PlayoffOutcome, SeasonHistory, SeasonRecap, TradeEval, TradePackage, TradeSuggestion,
+    MIN_SALARY, SALARY_CAP,
 };
 pub use player::{Career, CareerSeason, Contract, Honor, HonorEntry, Player, Ratings, SeasonStats};
 pub use playoffs::{Playoffs, Series, ROUND_NAMES};
 pub use schedule::{Game, GameResult};
 pub use sim::{simulate_game, simulate_game_pbp, GameSim, PlayEvent, PlayerLine, TeamBox};
 pub use standings::{conference_standings, playoff_seeds, StandingsRow};
-pub use team::Team;
+pub use team::{Finances, Team};
 pub use teams_data::{TeamPreset, PRESETS};
 pub use types::{Color, Conference, PlayerId, Position, TeamId};
 
@@ -163,6 +164,49 @@ mod integration_tests {
             }
         }
         assert!(done, "expected at least one acceptable trade to exist");
+    }
+
+    #[test]
+    fn draft_picks_exist_and_trade() {
+        let mut league = League::new(3);
+        league.select_team(0);
+        let user = 0u32;
+
+        // Every team owns its own 1st & 2nd for the 4-year window (8 picks each).
+        for t in &league.teams {
+            assert_eq!(league.picks_owned_by(t.id).len(), 8, "{} picks", t.abbrev);
+        }
+
+        // A package the finder surfaces must actually execute (picks and all).
+        let best = *league.teams[user as usize]
+            .roster
+            .iter()
+            .max_by(|a, b| league.player_trade_value(**a).partial_cmp(&league.player_trade_value(**b)).unwrap())
+            .unwrap();
+        let pkgs = league.find_packages_to_trade_away(best);
+        if let Some(p) = pkgs.first().cloned() {
+            let other = p.other;
+            let ok = league.execute_trade_full(other, &p.give_players, &p.give_picks, &p.get_players, &p.get_picks);
+            assert!(ok, "finder package should execute");
+            // Any picks we received now belong to us.
+            for id in &p.get_picks {
+                assert_eq!(league.picks_owned_by(user).iter().find(|pk| pk.id == *id).map(|pk| pk.owner), Some(user));
+            }
+        }
+
+        // A traded pick conveys to its new owner in that year's draft.
+        let mut league = League::new(3);
+        league.select_team(0);
+        // Give team 1 one of our future 1st-rounders directly via a lopsided deal.
+        let my_pick = league.picks_owned_by(0)[0].id;
+        // Send a valuable player + that pick for team 1's worst player: CPU accepts.
+        let my_best = *league.teams[0].roster.iter().max_by(|a, b| league.player_trade_value(**a).partial_cmp(&league.player_trade_value(**b)).unwrap()).unwrap();
+        let their_worst = *league.teams[1].roster.iter().min_by(|a, b| league.player_trade_value(**a).partial_cmp(&league.player_trade_value(**b)).unwrap()).unwrap();
+        let e = league.evaluate_trade_full(1, &[my_best], &[my_pick], &[their_worst], &[]);
+        if e.accepted {
+            assert!(league.execute_trade_full(1, &[my_best], &[my_pick], &[their_worst], &[]));
+            assert_eq!(league.picks_owned_by(1).iter().find(|pk| pk.id == my_pick).map(|pk| pk.owner), Some(1));
+        }
     }
 
     #[test]

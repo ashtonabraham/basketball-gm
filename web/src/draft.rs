@@ -179,7 +179,7 @@ fn ProspectBoard() -> impl IntoView {
                     <th class="left">"Prospect"</th>
                     {th("Pos", DSort::Pos)}{th("Age", DSort::Age)}{th("OVR", DSort::Ovr)}{th("POT", DSort::Pot)}
                     <th title="Inside scoring">"INS"</th><th title="Outside shooting">"OUT"</th>
-                    <th title="Playmaking">"PLM"</th><th title="Defense">"DEF"</th><th title="Physical">"ATH"</th><th></th>
+                    <th title="Playmaking">"PMK"</th><th title="Defense">"DEF"</th><th title="Physical">"ATH"</th><th></th>
                 </tr></thead>
                 <tbody>
                     {move || {

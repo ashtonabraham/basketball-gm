@@ -474,16 +474,46 @@ body {
 .pm-sub { display: flex; gap: 1.1rem; margin-top: .35rem; font-size: .85rem; color: var(--muted); }
 .pm-sub b { color: var(--text); }
 
-.pm-honors { display: flex; flex-wrap: wrap; gap: .4rem; margin: 1rem 0 .25rem; }
+.pm-honors { display: flex; flex-wrap: wrap; gap: .4rem; margin: 1rem 0 .75rem; }
 .honor-badge {
   background: color-mix(in srgb, var(--accent) 16%, transparent);
   border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
   color: var(--text); font-weight: 800; font-size: .74rem;
   padding: .28rem .6rem; border-radius: 999px;
 }
+.honor-list { list-style: none; margin: 0; padding: 0; }
+.honor-list li {
+  display: flex; align-items: baseline; gap: .75rem;
+  padding: .5rem .2rem; border-bottom: 1px solid var(--border); font-weight: 600;
+}
+.hl-year { color: var(--accent); font-weight: 800; font-variant-numeric: tabular-nums; }
 
-.pm-body { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-top: 1.25rem; }
-@media (max-width: 680px) { .pm-body { grid-template-columns: 1fr; } }
+/* Tabs inside the player box */
+.pm-tabs { display: flex; gap: .35rem; margin: 1.1rem 0 .5rem; border-bottom: 1px solid var(--border); }
+.pm-tab {
+  background: transparent; border: none; border-bottom: 2px solid transparent;
+  color: var(--muted); font-weight: 700; font-size: .85rem; padding: .55rem .9rem; cursor: pointer;
+}
+.pm-tab:hover { color: var(--text); }
+.pm-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.pm-tabnote { color: var(--muted); font-size: .8rem; margin: .25rem 0 .5rem; }
+.pm-tabnote b { color: var(--text); }
+
+/* Detailed stat grid */
+.stat-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(74px, 1fr));
+  gap: .5rem; margin: .25rem 0 1rem;
+}
+.stat-cell {
+  display: flex; flex-direction: column; align-items: center; gap: .1rem;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: .55rem .3rem;
+}
+.sc-val { font-weight: 800; font-size: 1.05rem; }
+.sc-key { color: var(--muted); font-size: .66rem; text-transform: uppercase; letter-spacing: .04em; }
+.pm-career-scroll { overflow-x: auto; }
+
+.pm-ratings { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem 1.5rem; margin-top: .5rem; }
+@media (max-width: 680px) { .pm-ratings { grid-template-columns: 1fr; } }
 
 .rt-group { margin-bottom: 1rem; }
 .rt-group-head {
@@ -509,3 +539,52 @@ body {
 .pm-career { font-size: .8rem; }
 .pm-career th, .pm-career td { padding: .3rem .35rem; }
 .pm-totals td { font-weight: 800; border-top: 2px solid var(--border); color: var(--text); }
+
+/* ---- 2K-style trade finder ---- */
+.seg-row { display: inline-flex; gap: .25rem; background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; padding: .25rem; margin-bottom: 1rem; }
+.seg { background: transparent; border: none; color: var(--muted); font-weight: 700; font-size: .85rem; padding: .45rem .9rem; border-radius: 9px; cursor: pointer; }
+.seg:hover { color: var(--text); }
+.seg.active { background: var(--accent); color: #fff; }
+.finder-selects { display: flex; gap: .5rem; flex-wrap: wrap; }
+
+.pkg-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: .85rem; margin-top: .5rem; }
+.pkg-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 14px; padding: .85rem; }
+.pkg-cols { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; }
+.pkg-h { font-size: .66rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 800; margin-bottom: .35rem; }
+.pkg-asset { font-size: .82rem; font-weight: 600; padding: .25rem .4rem; border-radius: 8px; margin-bottom: .25rem; background: var(--panel); border: 1px solid var(--border); }
+.pkg-asset.out { border-left: 3px solid #e0655a; }
+.pkg-asset.in { border-left: 3px solid #2faa55; }
+.pkg-meter { height: 7px; border-radius: 999px; background: color-mix(in srgb, #e0655a 45%, transparent); overflow: hidden; margin: .7rem 0 .5rem; }
+.pkg-fill { display: block; height: 100%; background: #2faa55; border-radius: 999px; }
+.pkg-foot { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.pkg-vals { color: var(--muted); font-size: .74rem; }
+.pkg-foot .btn { padding: .4rem .7rem; font-size: .8rem; }
+.trade-row.pick { border-left: 3px solid var(--accent); }
+.trade-status { margin-top: 1rem; font-weight: 700; }
+
+/* ---- Finances ---- */
+.fin-att { margin-bottom: 1rem; }
+.fin-att-top { display: flex; justify-content: space-between; font-size: .85rem; font-weight: 600; }
+.fin-att-top .dim { color: var(--muted); font-weight: 500; }
+.fin-bar { height: 8px; border-radius: 999px; background: var(--panel-2); overflow: hidden; margin-top: .3rem; }
+.fin-fill { display: block; height: 100%; border-radius: 999px; background: var(--accent); }
+.fin-pl { margin-top: .5rem; }
+.fin-pl td { padding: .4rem .5rem; }
+.fin-pl .fin-sum td { font-weight: 800; border-top: 1px solid var(--border); }
+.fin-profit td { font-weight: 900; font-size: 1.02rem; border-top: 2px solid var(--border); }
+.fin-profit.good td { color: #2faa55; }
+.fin-profit.bad td { color: #e0413a; }
+.fin-warn { color: #e0955a; font-weight: 700; font-size: .82rem; margin: .75rem 0 0; }
+
+.fin-group-label { font-size: .7rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 800; margin: 1.1rem 0 .5rem; }
+.fin-ctl { display: flex; align-items: center; gap: .6rem; margin-bottom: .55rem; }
+.fin-ctl label { flex: 0 0 110px; font-size: .88rem; font-weight: 600; }
+.fin-num { width: 90px; }
+.fin-unit { color: var(--muted); font-size: .78rem; }
+
+.fin-slider { margin-bottom: .85rem; }
+.fin-slider-top { display: flex; justify-content: space-between; align-items: baseline; }
+.fin-slider-label { font-weight: 600; font-size: .9rem; }
+.fin-slider-note { display: block; color: var(--muted); font-size: .72rem; font-weight: 400; }
+.fin-slider-val { font-weight: 800; }
+.fin-range { width: 100%; margin-top: .35rem; accent-color: var(--accent); }

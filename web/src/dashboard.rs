@@ -24,6 +24,7 @@ pub fn Dashboard() -> impl IntoView {
                         Tab::Roster => view! { <RosterPanel/> }.into_any(),
                         Tab::Stats => view! { <StatsPanel/> }.into_any(),
                         Tab::Trades => view! { <TradesPanel/> }.into_any(),
+                        Tab::Finances => view! { <FinancesPanel/> }.into_any(),
                         Tab::Playoffs => view! { <PlayoffsPanel/> }.into_any(),
                         Tab::History => view! { <HistoryPanel/> }.into_any(),
                     }}
@@ -141,6 +142,7 @@ fn Sidebar() -> impl IntoView {
                 {nav_btn(Tab::Roster, "Roster")}
                 {nav_btn(Tab::Stats, "Stats")}
                 {nav_btn(Tab::Trades, "Trades")}
+                {nav_btn(Tab::Finances, "Finances")}
                 {nav_btn(Tab::Playoffs, "Playoffs")}
                 {nav_btn(Tab::History, "History")}
             </nav>
@@ -432,7 +434,7 @@ fn RosterPanel() -> impl IntoView {
                     <th title="Potential (peak overall)">"POT"</th>
                     <th title="Salary">"Salary"</th><th title="Years left">"Yrs"</th>
                     <th title="Inside scoring">"INS"</th><th title="Outside shooting">"OUT"</th>
-                    <th title="Playmaking">"PLM"</th><th title="Defense">"DEF"</th><th title="Physical">"ATH"</th>
+                    <th title="Playmaking">"PMK"</th><th title="Defense">"DEF"</th><th title="Physical">"ATH"</th>
                 </tr></thead>
                 <tbody>
                     {move || players().into_iter().map(|(id, name, pos, age, ovr, pot, salary, years, ins, out, plm, def, ath)| {
@@ -454,24 +456,49 @@ fn RosterPanel() -> impl IntoView {
     }
 }
 
+/// A trade package resolved to display strings + raw ids for execution.
+#[derive(Clone)]
+struct PkgView {
+    other: u32,
+    give: Vec<String>,
+    get: Vec<String>,
+    give_value: i64,
+    get_value: i64,
+    give_players: Vec<u32>,
+    give_picks: Vec<u32>,
+    get_players: Vec<u32>,
+    get_picks: Vec<u32>,
+}
+
+fn pkgview(l: &engine::League, p: &engine::TradePackage) -> PkgView {
+    let pname = |id: u32| l.players.iter().find(|x| x.id == id).map(|x| format!("{} ({})", x.name, x.overall())).unwrap_or_default();
+    let give: Vec<String> = p.give_players.iter().map(|id| pname(*id))
+        .chain(p.give_picks.iter().map(|id| l.pick_label(*id))).collect();
+    let get: Vec<String> = p.get_players.iter().map(|id| pname(*id))
+        .chain(p.get_picks.iter().map(|id| l.pick_label(*id))).collect();
+    PkgView {
+        other: p.other, give, get,
+        give_value: p.give_value.round() as i64,
+        get_value: p.get_value.round() as i64,
+        give_players: p.give_players.clone(), give_picks: p.give_picks.clone(),
+        get_players: p.get_players.clone(), get_picks: p.get_picks.clone(),
+    }
+}
+
 #[component]
 fn TradesPanel() -> impl IntoView {
     let state = expect_context::<AppState>();
     let league = state.league;
 
     let can_trade = move || league.with(|l| l.can_trade());
-    let other = RwSignal::new(None::<u32>);
-    let give = RwSignal::new(Vec::<u32>::new());
-    let get = RwSignal::new(Vec::<u32>::new());
+    let mode = RwSignal::new(0u8); // 0 = acquire, 1 = shop, 2 = manual
     let msg = RwSignal::new(String::new());
 
-    // Opponent options (all teams but the user's).
+    let user_id = move || league.with(|l| l.user_team_id);
     let teams = move || league.with(|l| {
         let user = l.user_team_id;
         l.teams.iter().filter(|t| Some(t.id) != user).map(|t| (t.id, t.full_name())).collect::<Vec<_>>()
     });
-
-    // A team's roster as (id, name, pos, ovr, salary, value).
     let roster = move |tid: Option<u32>| league.with(|l| {
         let Some(tid) = tid else { return Vec::new() };
         let Some(team) = l.teams.iter().find(|t| t.id == tid) else { return Vec::new() };
@@ -482,152 +509,234 @@ fn TradesPanel() -> impl IntoView {
         v.sort_by(|a, b| b.3.cmp(&a.3));
         v
     });
-    let user_id = move || league.with(|l| l.user_team_id);
+    let picks = move |tid: Option<u32>| league.with(|l| {
+        let Some(tid) = tid else { return Vec::new() };
+        l.picks_owned_by(tid).into_iter().map(|pk| (pk.id, l.pick_label(pk.id), l.pick_value(pk).round() as i64)).collect::<Vec<_>>()
+    });
 
-    let eval = move || {
-        let o = other.get()?;
-        let (g, r) = (give.get(), get.get());
-        if g.is_empty() && r.is_empty() { return None; }
-        Some(league.with(|l| l.evaluate_trade(o, &g, &r)))
-    };
-
-    let toggle_give = move |pid: u32| give.update(|v| if v.contains(&pid) { v.retain(|x| *x != pid) } else { v.push(pid) });
-    let toggle_get = move |pid: u32| get.update(|v| if v.contains(&pid) { v.retain(|x| *x != pid) } else { v.push(pid) });
-
-    let propose = move |_| {
-        if let Some(o) = other.get() {
-            let (g, r) = (give.get(), get.get());
-            let ok = { let mut d = false; state.update_league(|l| d = l.execute_trade(o, &g, &r)); d };
-            if ok {
-                msg.set("\u{2705} Trade completed!".into());
-                give.set(vec![]);
-                get.set(vec![]);
-            } else {
-                msg.set("They turned it down.".into());
-            }
+    // A reusable package card with a value meter and an Accept button.
+    let pkg_card = move |p: PkgView| {
+        let total = (p.give_value + p.get_value).max(1) as f64;
+        let fill = format!("{:.0}%", p.get_value as f64 / total * 100.0);
+        let p2 = p.clone();
+        let (gv, rv) = (p.give_value, p.get_value);
+        view! {
+            <div class="pkg-card">
+                <div class="pkg-cols">
+                    <div class="pkg-side">
+                        <div class="pkg-h">"You give"</div>
+                        {p.give.into_iter().map(|s| view! { <div class="pkg-asset out">{s}</div> }).collect_view()}
+                    </div>
+                    <div class="pkg-side">
+                        <div class="pkg-h">"You get"</div>
+                        {p.get.into_iter().map(|s| view! { <div class="pkg-asset in">{s}</div> }).collect_view()}
+                    </div>
+                </div>
+                <div class="pkg-meter" title="Value balance"><span class="pkg-fill" style=format!("width:{}", fill)></span></div>
+                <div class="pkg-foot">
+                    <span class="pkg-vals">{format!("give {} \u{2194} get {}", gv, rv)}</span>
+                    <button class="btn btn-primary" on:click=move |_| {
+                        let pk = p2.clone();
+                        let ok = { let mut d = false; state.update_league(|l| d = l.execute_trade_full(pk.other, &pk.give_players, &pk.give_picks, &pk.get_players, &pk.get_picks)); d };
+                        msg.set(if ok { "\u{2705} Trade completed!".into() } else { "They turned it down.".into() });
+                    }>"Accept Trade"</button>
+                </div>
+            </div>
         }
     };
 
-    // Trade finder: shop one of your players, see deals the CPU would accept.
-    let shop = RwSignal::new(None::<u32>);
-    let suggestions = move || league.with(|l| {
-        let Some(pid) = shop.get() else { return Vec::new() };
-        l.find_trades_for(pid).into_iter().map(|s| {
-            let ab = l.teams.iter().find(|t| t.id == s.other).map(|t| t.full_name()).unwrap_or_default();
-            (s.other, ab, s.message, s.get)
-        }).collect::<Vec<_>>()
+    // ---- Acquire (buy) ----
+    let target_team = RwSignal::new(None::<u32>);
+    let target = RwSignal::new(None::<u32>);
+    let buy_pkgs = move || league.with(|l| {
+        let Some(t) = target.get() else { return Vec::new() };
+        l.find_packages_to_acquire(t).iter().map(|p| pkgview(l, p)).collect::<Vec<_>>()
     });
-    let load = move |o: u32, g: Vec<u32>, getv: Vec<u32>| {
-        other.set(Some(o));
-        give.set(g);
-        get.set(getv);
-        msg.set("Loaded — review and propose.".into());
+
+    // ---- Shop (sell) ----
+    let shop = RwSignal::new(None::<u32>);
+    let sell_pkgs = move || league.with(|l| {
+        let Some(s) = shop.get() else { return Vec::new() };
+        l.find_packages_to_trade_away(s).iter().map(|p| pkgview(l, p)).collect::<Vec<_>>()
+    });
+
+    // ---- Manual builder ----
+    let other = RwSignal::new(None::<u32>);
+    let gp = RwSignal::new(Vec::<u32>::new());
+    let gk = RwSignal::new(Vec::<u32>::new());
+    let rp = RwSignal::new(Vec::<u32>::new());
+    let rk = RwSignal::new(Vec::<u32>::new());
+    let eval = move || {
+        let o = other.get()?;
+        if gp.get().is_empty() && gk.get().is_empty() && rp.get().is_empty() && rk.get().is_empty() { return None; }
+        Some(league.with(|l| l.evaluate_trade_full(o, &gp.get(), &gk.get(), &rp.get(), &rk.get())))
+    };
+    let propose = move |_| {
+        if let Some(o) = other.get() {
+            let ok = { let mut d = false; state.update_league(|l| d = l.execute_trade_full(o, &gp.get(), &gk.get(), &rp.get(), &rk.get())); d };
+            if ok { msg.set("\u{2705} Trade completed!".into()); gp.set(vec![]); gk.set(vec![]); rp.set(vec![]); rk.set(vec![]); }
+            else { msg.set("They turned it down.".into()); }
+        }
+    };
+
+    let mode_btn = move |m: u8, label: &'static str| view! {
+        <button class=move || if mode.get() == m { "seg active" } else { "seg" } on:click=move |_| { mode.set(m); msg.set(String::new()); }>{label}</button>
     };
 
     view! {
         <Show when=can_trade fallback=|| view! {
             <div class="card"><p class="empty">"Trades are closed right now (past the in-season deadline). Come back next offseason or earlier next season."</p></div>
         }>
-            <div class="card" style="margin-bottom:1.25rem">
-                <div class="roster-head">
-                    <h3 class="card-title">"Trade Finder"</h3>
-                    <select class="input" on:change=move |e| shop.set(event_target_value(&e).parse().ok())>
-                        <option value="">"Shop a player\u{2026}"</option>
-                        {move || roster(user_id()).into_iter().map(|(id, name, _pos, ovr, _sal, _val)| view! {
-                            <option value=id.to_string()>{format!("{} ({})", name, ovr)}</option>
-                        }).collect_view()}
-                    </select>
-                </div>
-                {move || {
-                    let sugg = suggestions();
-                    if shop.get().is_none() {
-                        view! { <p class="hint">"Pick one of your players to see what the league would give up for him."</p> }.into_any()
-                    } else if sugg.is_empty() {
-                        view! { <p class="empty">"No team bit on that one. Try a more valuable player."</p> }.into_any()
-                    } else {
-                        view! {
-                            <div class="finder-list">
-                                {sugg.into_iter().map(move |(o, team, who, getv)| {
-                                    let shop_pid = shop.get().unwrap();
-                                    let getv2 = getv.clone();
-                                    view! {
-                                        <div class="finder-row">
-                                            <span class="finder-team">{team}</span>
-                                            <span class="finder-get">"gives "{who}</span>
-                                            <button class="mini-btn draft" on:click=move |_| load(o, vec![shop_pid], getv2.clone())>"Load"</button>
-                                        </div>
-                                    }
+            <div class="seg-row">
+                {mode_btn(0, "Acquire a Player")}
+                {mode_btn(1, "Shop a Player")}
+                {mode_btn(2, "Build a Trade")}
+            </div>
+
+            // ===== Acquire =====
+            <Show when=move || mode.get() == 0>
+                <div class="card">
+                    <div class="roster-head">
+                        <h3 class="card-title">"Find a Trade for a Target"</h3>
+                        <div class="finder-selects">
+                            <select class="input" on:change=move |e| { target_team.set(event_target_value(&e).parse().ok()); target.set(None); }>
+                                <option value="">"Team\u{2026}"</option>
+                                {move || teams().into_iter().map(|(id, name)| view! { <option value=id.to_string()>{name}</option> }).collect_view()}
+                            </select>
+                            <select class="input" prop:value=move || target.get().map(|t| t.to_string()).unwrap_or_default()
+                                on:change=move |e| target.set(event_target_value(&e).parse().ok())>
+                                <option value="">"Player\u{2026}"</option>
+                                {move || roster(target_team.get()).into_iter().map(|(id, name, _p, ovr, _s, _v)| view! {
+                                    <option value=id.to_string()>{format!("{} ({})", name, ovr)}</option>
                                 }).collect_view()}
-                            </div>
-                        }.into_any()
-                    }
-                }}
-            </div>
-
-            <div class="card">
-                <div class="roster-head">
-                    <h3 class="card-title">"Trade"</h3>
-                    <select class="input" on:change=move |e| {
-                        other.set(event_target_value(&e).parse().ok());
-                        get.set(vec![]);
-                        msg.set(String::new());
-                    }>
-                        <option value="">"Select a team\u{2026}"</option>
-                        {move || teams().into_iter().map(|(id, name)| view! {
-                            <option value=id.to_string()>{name}</option>
-                        }).collect_view()}
-                    </select>
-                </div>
-
-                <div class="trade-cols">
-                    <div class="trade-side">
-                        <h4 class="round-name">"You send"</h4>
-                        {move || roster(user_id()).into_iter().map(move |(id, name, pos, ovr, sal, val)| {
-                            let picked = move || give.get().contains(&id);
-                            view! {
-                                <div class=move || if picked() { "trade-row picked" } else { "trade-row" }
-                                    on:click=move |_| toggle_give(id)>
-                                    <span class="tr-name">{name}</span>
-                                    <span class="tr-meta">{pos}" \u{2022} "{ovr}" \u{2022} "{sal}" \u{2022} val "{val}</span>
-                                </div>
-                            }
-                        }).collect_view()}
-                    </div>
-                    <div class="trade-side">
-                        <h4 class="round-name">"You receive"</h4>
-                        {move || roster(other.get()).into_iter().map(move |(id, name, pos, ovr, sal, val)| {
-                            let picked = move || get.get().contains(&id);
-                            view! {
-                                <div class=move || if picked() { "trade-row picked" } else { "trade-row" }
-                                    on:click=move |_| toggle_get(id)>
-                                    <span class="tr-name">{name}</span>
-                                    <span class="tr-meta">{pos}" \u{2022} "{ovr}" \u{2022} "{sal}" \u{2022} val "{val}</span>
-                                </div>
-                            }
-                        }).collect_view()}
-                    </div>
-                </div>
-
-                {move || eval().map(|e| {
-                    let cls = if e.accepted { "trade-verdict ok" } else if e.legal { "trade-verdict warn" } else { "trade-verdict bad" };
-                    view! {
-                        <div class=cls>
-                            <div class="trade-salaries">
-                                {format!("Out ${:.1}M  \u{2194}  In ${:.1}M", e.give_salary as f64 / 1000.0, e.get_salary as f64 / 1000.0)}
-                            </div>
-                            <div class="trade-msg">{e.message}</div>
+                            </select>
                         </div>
-                    }
-                })}
-
-                <div class="offer-actions">
-                    <button class="btn btn-primary" on:click=propose
-                        disabled=move || !eval().map(|e| e.accepted).unwrap_or(false)>
-                        "Propose Trade"
-                    </button>
-                    <span class="offer-msg">{move || msg.get()}</span>
+                    </div>
+                    {move || {
+                        if target.get().is_none() {
+                            view! { <p class="hint">"Pick a player you want, and the finder builds packages (players + picks) that land him."</p> }.into_any()
+                        } else {
+                            let pkgs = buy_pkgs();
+                            if pkgs.is_empty() {
+                                view! { <p class="empty">"No workable package \u{2014} you may not have enough to match, or he's not available. Try adding picks manually."</p> }.into_any()
+                            } else {
+                                view! { <div class="pkg-list">{pkgs.into_iter().map(pkg_card).collect_view()}</div> }.into_any()
+                            }
+                        }
+                    }}
                 </div>
-            </div>
+            </Show>
+
+            // ===== Shop =====
+            <Show when=move || mode.get() == 1>
+                <div class="card">
+                    <div class="roster-head">
+                        <h3 class="card-title">"Shop One of Your Players"</h3>
+                        <select class="input" on:change=move |e| shop.set(event_target_value(&e).parse().ok())>
+                            <option value="">"Your player\u{2026}"</option>
+                            {move || roster(user_id()).into_iter().map(|(id, name, _p, ovr, _s, _v)| view! {
+                                <option value=id.to_string()>{format!("{} ({})", name, ovr)}</option>
+                            }).collect_view()}
+                        </select>
+                    </div>
+                    {move || {
+                        if shop.get().is_none() {
+                            view! { <p class="hint">"Pick a player to shop and see the best package each team would send back."</p> }.into_any()
+                        } else {
+                            let pkgs = sell_pkgs();
+                            if pkgs.is_empty() {
+                                view! { <p class="empty">"No team bit on that one. Try a more valuable player."</p> }.into_any()
+                            } else {
+                                view! { <div class="pkg-list">{pkgs.into_iter().map(pkg_card).collect_view()}</div> }.into_any()
+                            }
+                        }
+                    }}
+                </div>
+            </Show>
+
+            // ===== Manual builder =====
+            <Show when=move || mode.get() == 2>
+                <div class="card">
+                    <div class="roster-head">
+                        <h3 class="card-title">"Build a Trade"</h3>
+                        <select class="input" on:change=move |e| { other.set(event_target_value(&e).parse().ok()); rp.set(vec![]); rk.set(vec![]); msg.set(String::new()); }>
+                            <option value="">"Select a team\u{2026}"</option>
+                            {move || teams().into_iter().map(|(id, name)| view! { <option value=id.to_string()>{name}</option> }).collect_view()}
+                        </select>
+                    </div>
+                    <div class="trade-cols">
+                        <div class="trade-side">
+                            <h4 class="round-name">"You send"</h4>
+                            {move || roster(user_id()).into_iter().map(move |(id, name, pos, ovr, sal, val)| {
+                                let picked = move || gp.get().contains(&id);
+                                view! {
+                                    <div class=move || if picked() { "trade-row picked" } else { "trade-row" }
+                                        on:click=move |_| gp.update(|v| if v.contains(&id) { v.retain(|x| *x != id) } else { v.push(id) })>
+                                        <span class="tr-name">{name}</span>
+                                        <span class="tr-meta">{pos}" \u{2022} "{ovr}" \u{2022} "{sal}" \u{2022} val "{val}</span>
+                                    </div>
+                                }
+                            }).collect_view()}
+                            {move || picks(user_id()).into_iter().map(move |(id, label, val)| {
+                                let picked = move || gk.get().contains(&id);
+                                view! {
+                                    <div class=move || if picked() { "trade-row pick picked" } else { "trade-row pick" }
+                                        on:click=move |_| gk.update(|v| if v.contains(&id) { v.retain(|x| *x != id) } else { v.push(id) })>
+                                        <span class="tr-name">"\u{1f4c4} "{label}</span>
+                                        <span class="tr-meta">"pick \u{2022} val "{val}</span>
+                                    </div>
+                                }
+                            }).collect_view()}
+                        </div>
+                        <div class="trade-side">
+                            <h4 class="round-name">"You receive"</h4>
+                            {move || roster(other.get()).into_iter().map(move |(id, name, pos, ovr, sal, val)| {
+                                let picked = move || rp.get().contains(&id);
+                                view! {
+                                    <div class=move || if picked() { "trade-row picked" } else { "trade-row" }
+                                        on:click=move |_| rp.update(|v| if v.contains(&id) { v.retain(|x| *x != id) } else { v.push(id) })>
+                                        <span class="tr-name">{name}</span>
+                                        <span class="tr-meta">{pos}" \u{2022} "{ovr}" \u{2022} "{sal}" \u{2022} val "{val}</span>
+                                    </div>
+                                }
+                            }).collect_view()}
+                            {move || picks(other.get()).into_iter().map(move |(id, label, val)| {
+                                let picked = move || rk.get().contains(&id);
+                                view! {
+                                    <div class=move || if picked() { "trade-row pick picked" } else { "trade-row pick" }
+                                        on:click=move |_| rk.update(|v| if v.contains(&id) { v.retain(|x| *x != id) } else { v.push(id) })>
+                                        <span class="tr-name">"\u{1f4c4} "{label}</span>
+                                        <span class="tr-meta">"pick \u{2022} val "{val}</span>
+                                    </div>
+                                }
+                            }).collect_view()}
+                        </div>
+                    </div>
+
+                    {move || eval().map(|e| {
+                        let cls = if e.accepted { "trade-verdict ok" } else if e.legal { "trade-verdict warn" } else { "trade-verdict bad" };
+                        view! {
+                            <div class=cls>
+                                <div class="trade-salaries">
+                                    {format!("Out ${:.1}M  \u{2194}  In ${:.1}M \u{2022} value {} \u{2194} {}", e.give_salary as f64 / 1000.0, e.get_salary as f64 / 1000.0, e.give_value.round() as i64, e.get_value.round() as i64)}
+                                </div>
+                                <div class="trade-msg">{e.message}</div>
+                            </div>
+                        }
+                    })}
+
+                    <div class="offer-actions">
+                        <button class="btn btn-primary" on:click=propose
+                            disabled=move || !eval().map(|e| e.accepted).unwrap_or(false)>
+                            "Propose Trade"
+                        </button>
+                    </div>
+                </div>
+            </Show>
+
+            <Show when=move || !msg.get().is_empty()>
+                <p class="offer-msg trade-status">{move || msg.get()}</p>
+            </Show>
         </Show>
     }
 }
@@ -848,6 +957,134 @@ fn ResultsBar() -> impl IntoView {
                 }).collect_view()}
             </div>
         </Show>
+    }
+}
+
+#[component]
+fn FinancesPanel() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let league = state.league;
+
+    let fin = move || league.with(|l| l.user_team_id.and_then(|id| l.teams.iter().find(|t| t.id == id)).map(|t| t.finances.clone()));
+    let proj = move || league.with(|l| l.user_team_id.map(|id| l.project_finances(id)));
+    let commit = move |f: engine::Finances| state.update_league(move |l| {
+        l.set_user_finances(f.ticket_price, f.concession_price, f.coaching, f.training, f.facilities, f.fan_interest);
+    });
+
+    let m = |v: u32| format!("${:.1}M", v as f64 / 1000.0);
+
+    view! {
+        <Show when=move || fin().is_some() fallback=|| view! { <div class="card"><p class="empty">"Pick a team first."</p></div> }>
+            <div class="two-col">
+                // ===== Profit & Loss =====
+                <div class="card">
+                    <h3 class="card-title">"Profit & Loss \u{2014} Projected"</h3>
+                    {move || proj().map(|p| {
+                        let att_pct = if p.capacity > 0 { p.attendance as f64 / p.capacity as f64 * 100.0 } else { 0.0 };
+                        let happy = fin().map(|f| f.fan_happiness).unwrap_or(0.0);
+                        let over = p.expenses > p.budget;
+                        view! {
+                            <div class="fin-att">
+                                <div class="fin-att-top">
+                                    <span>{format!("{} / {} fans", p.attendance, p.capacity)}</span>
+                                    <span class="dim">{format!("{:.0}% full", att_pct)}</span>
+                                </div>
+                                <div class="fin-bar"><span class="fin-fill" style=format!("width:{}%", att_pct)></span></div>
+                                <div class="fin-att-top" style="margin-top:.6rem">
+                                    <span>"Fan happiness"</span><span class="dim">{format!("{:.0}%", happy * 100.0)}</span>
+                                </div>
+                                <div class="fin-bar"><span class="fin-fill" style=format!("width:{}%", happy * 100.0)></span></div>
+                            </div>
+                            <table class="tbl fin-pl">
+                                <tbody>
+                                    <tr class="row"><td class="left">"Gate receipts"</td><td>{m(p.ticket_rev)}</td></tr>
+                                    <tr class="row"><td class="left">"Concessions"</td><td>{m(p.concession_rev)}</td></tr>
+                                    <tr class="row"><td class="left">"TV & sponsorship"</td><td>{m(p.tv_rev)}</td></tr>
+                                    <tr class="row fin-sum"><td class="left">"Revenue"</td><td>{m(p.revenue)}</td></tr>
+                                    <tr class="row"><td class="left">"Payroll"</td><td>{m(p.payroll)}</td></tr>
+                                    <tr class="row"><td class="left">"Departments"</td><td>{m(p.budgets)}</td></tr>
+                                    <tr class="row fin-sum"><td class="left">"Expenses"</td><td>{m(p.expenses)}</td></tr>
+                                    <tr class="row"><td class="left">"Owner budget"</td><td>{m(p.budget)}</td></tr>
+                                    <tr class={if p.profit >= 0 { "row fin-profit good" } else { "row fin-profit bad" }}>
+                                        <td class="left">"Projected profit"</td>
+                                        <td>{format!("{}${:.1}M", if p.profit < 0 { "-" } else { "" }, (p.profit.abs() as f64) / 1000.0)}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                            {over.then(|| view! { <p class="fin-warn">"\u{26a0} Over the owner's budget \u{2014} trim payroll or department spending."</p> })}
+                        }
+                    })}
+                </div>
+
+                // ===== Controls =====
+                <div class="card">
+                    <h3 class="card-title">"Front Office"</h3>
+
+                    <div class="fin-group-label">"Pricing"</div>
+                    <div class="fin-ctl">
+                        <label>"Ticket price"</label>
+                        <input class="input fin-num" type="number" min="10" max="200" step="1"
+                            prop:value=move || fin().map(|f| f.ticket_price).unwrap_or(0)
+                            on:input=move |e| { if let Some(mut f) = fin() { f.ticket_price = event_target_value(&e).parse().unwrap_or(f.ticket_price); commit(f); } }/>
+                        <span class="fin-unit">"$/seat"</span>
+                    </div>
+                    <div class="fin-ctl">
+                        <label>"Concessions"</label>
+                        <input class="input fin-num" type="number" min="5" max="60" step="1"
+                            prop:value=move || fin().map(|f| f.concession_price).unwrap_or(0)
+                            on:input=move |e| { if let Some(mut f) = fin() { f.concession_price = event_target_value(&e).parse().unwrap_or(f.concession_price); commit(f); } }/>
+                        <span class="fin-unit">"$/fan"</span>
+                    </div>
+
+                    <div class="fin-group-label">"Department budgets"</div>
+                    {fin_slider("Coaching", "faster player development", fin, commit, Field::Coaching)}
+                    {fin_slider("Training", "faster growth, slower decline", fin, commit, Field::Training)}
+                    {fin_slider("Facilities", "attendance + free-agent appeal", fin, commit, Field::Facilities)}
+                    {fin_slider("Fan Interest", "attendance + fan happiness", fin, commit, Field::FanInterest)}
+                </div>
+            </div>
+        </Show>
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Field { Coaching, Training, Facilities, FanInterest }
+
+/// A budget slider in $M (stored as thousands). Higher = better effect, more cost.
+fn fin_slider(
+    label: &'static str,
+    note: &'static str,
+    fin: impl Fn() -> Option<engine::Finances> + Copy + Send + Sync + 'static,
+    commit: impl Fn(engine::Finances) + Copy + Send + Sync + 'static,
+    field: Field,
+) -> impl IntoView {
+    let read = move || fin().map(|f| match field {
+        Field::Coaching => f.coaching,
+        Field::Training => f.training,
+        Field::Facilities => f.facilities,
+        Field::FanInterest => f.fan_interest,
+    }).unwrap_or(0);
+    let write = move |v: u32| {
+        if let Some(mut f) = fin() {
+            match field {
+                Field::Coaching => f.coaching = v,
+                Field::Training => f.training = v,
+                Field::Facilities => f.facilities = v,
+                Field::FanInterest => f.fan_interest = v,
+            }
+            commit(f);
+        }
+    };
+    view! {
+        <div class="fin-slider">
+            <div class="fin-slider-top">
+                <span class="fin-slider-label">{label}<span class="fin-slider-note">{note}</span></span>
+                <span class="fin-slider-val">{move || format!("${:.1}M", read() as f64 / 1000.0)}</span>
+            </div>
+            <input class="fin-range" type="range" min="0" max="40" step="0.5"
+                prop:value=move || read() as f64 / 1000.0
+                on:input=move |e| write((event_target_value(&e).parse::<f64>().unwrap_or(0.0) * 1000.0) as u32)/>
+        </div>
     }
 }
 

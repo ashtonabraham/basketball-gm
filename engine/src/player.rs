@@ -214,11 +214,30 @@ impl SeasonStats {
         self.per_game(self.min)
     }
 
+    pub fn spg(&self) -> f64 {
+        self.per_game(self.stl)
+    }
+    pub fn bpg(&self) -> f64 {
+        self.per_game(self.blk)
+    }
+    pub fn tovpg(&self) -> f64 {
+        self.per_game(self.tov)
+    }
+    pub fn orpg(&self) -> f64 {
+        self.per_game(self.oreb)
+    }
+    pub fn drpg(&self) -> f64 {
+        self.per_game(self.dreb)
+    }
+
     pub fn fg_pct(&self) -> f64 {
         if self.fga == 0 { 0.0 } else { self.fgm as f64 / self.fga as f64 }
     }
     pub fn tp_pct(&self) -> f64 {
         if self.tpa == 0 { 0.0 } else { self.tpm as f64 / self.tpa as f64 }
+    }
+    pub fn ft_pct(&self) -> f64 {
+        if self.fta == 0 { 0.0 } else { self.ftm as f64 / self.fta as f64 }
     }
 
     /// Add another season's totals into these (for career totals).

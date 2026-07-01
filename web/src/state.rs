@@ -14,6 +14,7 @@ pub enum Tab {
     Roster,
     Stats,
     Trades,
+    Finances,
     Playoffs,
     History,
 }
