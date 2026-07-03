@@ -571,9 +571,11 @@ body {
 .fin-pl { margin-top: .5rem; }
 .fin-pl td { padding: .4rem .5rem; }
 .fin-pl .fin-sum td { font-weight: 800; border-top: 1px solid var(--border); }
-.fin-profit td { font-weight: 900; font-size: 1.02rem; border-top: 2px solid var(--border); }
-.fin-profit.good td { color: #2faa55; }
-.fin-profit.bad td { color: #e0413a; }
+.fin-pl .fin-sum.rev td { color: #2faa55; }
+.fin-pl .fin-sum.exp td { color: #e0413a; }
+.fin-profit td { font-weight: 900; font-size: 1.02rem; border-top: 2px solid var(--border); color: var(--text); }
+.fin-profit .pl-num.good { color: #2faa55; }
+.fin-profit .pl-num.bad { color: #e0413a; }
 .fin-warn { color: #e0955a; font-weight: 700; font-size: .82rem; margin: .75rem 0 0; }
 
 .fin-group-label { font-size: .7rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 800; margin: 1.1rem 0 .5rem; }
@@ -588,3 +590,8 @@ body {
 .fin-slider-note { display: block; color: var(--muted); font-size: .72rem; font-weight: 400; }
 .fin-slider-val { font-weight: 800; }
 .fin-range { width: 100%; margin-top: .35rem; accent-color: var(--accent); }
+
+.fin-stadium { display: flex; align-items: center; justify-content: space-between; gap: .75rem; margin: .35rem 0; }
+.fin-stadium-info { font-weight: 600; font-size: .9rem; }
+.fin-stadium .btn { padding: .4rem .7rem; font-size: .82rem; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }

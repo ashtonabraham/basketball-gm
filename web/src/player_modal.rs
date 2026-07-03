@@ -1,6 +1,6 @@
 //! Player detail modal: opens when a player's name is clicked anywhere in the
-//! app. Three tabs inside the box — Attributes (bar-graph ratings), Stats
-//! (detailed per-game + season-by-season career), and Awards (accomplishments).
+//! app. Three tabs — Attributes (bar-graph ratings), Stats (2K-style career
+//! grid: newest season on top, career averages at the bottom), and Awards.
 
 use crate::state::AppState;
 use engine::{Honor, SeasonStats};
@@ -21,13 +21,13 @@ struct Group {
     rows: Vec<RatingRow>,
 }
 
-/// One season in the career log (rich).
+/// One row of the career stats grid (a season, or the career-average total).
 #[derive(Clone)]
-struct CareerRow {
-    season: u32,
+struct StatRow {
+    season: String,
     team: String,
-    age: u8,
-    ovr: u8,
+    age: String,
+    ovr: String,
     gp: u32,
     mpg: f64,
     ppg: f64,
@@ -35,9 +35,34 @@ struct CareerRow {
     apg: f64,
     spg: f64,
     bpg: f64,
+    tov: f64,
     fg: f64,
     tp: f64,
     ft: f64,
+    total: bool,
+}
+
+impl StatRow {
+    fn from_season(season: u32, team: String, age: u8, ovr: u8, s: &SeasonStats) -> StatRow {
+        StatRow {
+            season: season.to_string(),
+            team,
+            age: age.to_string(),
+            ovr: ovr.to_string(),
+            gp: s.gp,
+            mpg: s.mpg(),
+            ppg: s.ppg(),
+            rpg: s.rpg(),
+            apg: s.apg(),
+            spg: s.spg(),
+            bpg: s.bpg(),
+            tov: s.tovpg(),
+            fg: s.fg_pct(),
+            tp: s.tp_pct(),
+            ft: s.ft_pct(),
+            total: false,
+        }
+    }
 }
 
 /// Everything the modal needs, cloned out of the league under one borrow.
@@ -52,35 +77,13 @@ struct PView {
     salary: String,
     years: u8,
     groups: Vec<Group>,
-    live: Option<Vec<(&'static str, String)>>, // this-season detailed stat pairs
-    career: Vec<CareerRow>,
-    totals: Option<Vec<(&'static str, String)>>, // career detailed stat pairs
+    stats: Vec<StatRow>,
     honors_badges: Vec<String>,
     honors_list: Vec<(u32, &'static str)>,
 }
 
 fn pct(x: f64) -> String {
     format!("{:.1}%", x * 100.0)
-}
-
-/// Detailed per-game stat pairs for a stat block (used for both the live season
-/// and career totals).
-fn detail_pairs(s: &SeasonStats) -> Vec<(&'static str, String)> {
-    vec![
-        ("PPG", format!("{:.1}", s.ppg())),
-        ("RPG", format!("{:.1}", s.rpg())),
-        ("APG", format!("{:.1}", s.apg())),
-        ("SPG", format!("{:.1}", s.spg())),
-        ("BPG", format!("{:.1}", s.bpg())),
-        ("TOV", format!("{:.1}", s.tovpg())),
-        ("MPG", format!("{:.1}", s.mpg())),
-        ("OREB", format!("{:.1}", s.orpg())),
-        ("DREB", format!("{:.1}", s.drpg())),
-        ("FG%", pct(s.fg_pct())),
-        ("3P%", pct(s.tp_pct())),
-        ("FT%", pct(s.ft_pct())),
-        ("GP", format!("{}", s.gp)),
-    ]
 }
 
 #[component]
@@ -108,6 +111,11 @@ pub fn PlayerModal() -> impl IntoView {
                 .and_then(|t| l.teams.iter().find(|tm| tm.id == t))
                 .map(|t| t.full_name())
                 .unwrap_or_else(|| "Free Agent".to_string());
+            let team_abbrev = p
+                .team
+                .and_then(|t| l.teams.iter().find(|tm| tm.id == t))
+                .map(|t| t.abbrev.clone())
+                .unwrap_or_default();
 
             let groups = vec![
                 Group { name: "Inside", grade: r.inside(), rows: vec![
@@ -140,44 +148,32 @@ pub fn PlayerModal() -> impl IntoView {
 
             let career = l.career(pid);
 
-            let rows: Vec<CareerRow> = career
-                .map(|c| {
-                    c.seasons
-                        .iter()
-                        .map(|cs| {
-                            let s = &cs.stats;
-                            CareerRow {
-                                season: cs.season,
-                                team: cs.team_abbrev.clone(),
-                                age: cs.age,
-                                ovr: cs.overall,
-                                gp: s.gp,
-                                mpg: s.mpg(),
-                                ppg: s.ppg(),
-                                rpg: s.rpg(),
-                                apg: s.apg(),
-                                spg: s.spg(),
-                                bpg: s.bpg(),
-                                fg: s.fg_pct(),
-                                tp: s.tp_pct(),
-                                ft: s.ft_pct(),
-                            }
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            // Build the career grid: current (in-progress) season on top, then
+            // logged seasons newest-first, then a career-average total row.
+            let mut stats: Vec<StatRow> = Vec::new();
+            let mut total = SeasonStats::default();
 
-            let totals = career
-                .map(|c| c.totals())
-                .filter(|t: &SeasonStats| t.gp > 0)
-                .map(|t| detail_pairs(&t));
-
-            // The in-progress season line (only if not already in the log).
             let st = &l.season_stats[pid as usize];
-            let already_logged = rows.last().map(|r| r.season == l.season).unwrap_or(false);
-            let live = (st.gp > 0 && !already_logged).then(|| detail_pairs(st));
+            let logged_this = career.map(|c| c.seasons.last().map(|cs| cs.season == l.season).unwrap_or(false)).unwrap_or(false);
+            if st.gp > 0 && !logged_this {
+                stats.push(StatRow::from_season(l.season, team_abbrev.clone(), p.age, p.overall(), st));
+                total.add(st);
+            }
+            if let Some(c) = career {
+                for cs in c.seasons.iter().rev() {
+                    stats.push(StatRow::from_season(cs.season, cs.team_abbrev.clone(), cs.age, cs.overall, &cs.stats));
+                    total.add(&cs.stats);
+                }
+            }
+            if total.gp > 0 && stats.len() > 1 {
+                let mut trow = StatRow::from_season(0, String::new(), 0, 0, &total);
+                trow.season = "Career".into();
+                trow.age = String::new();
+                trow.ovr = String::new();
+                trow.total = true;
+                stats.push(trow);
+            }
 
-            // Honors — aggregated badges + a dated list.
             let (honors_badges, honors_list) = career
                 .map(|c| {
                     let order = [Honor::Champion, Honor::Mvp, Honor::FinalsMvp, Honor::Dpoy, Honor::Roy];
@@ -209,9 +205,7 @@ pub fn PlayerModal() -> impl IntoView {
                 salary: if p.contract.years > 0 { p.contract.salary_str() } else { "\u{2014}".into() },
                 years: p.contract.years,
                 groups,
-                live,
-                career: rows,
-                totals,
+                stats,
                 honors_badges,
                 honors_list,
             })
@@ -283,59 +277,44 @@ pub fn PlayerModal() -> impl IntoView {
                                     }}
                                 </Show>
 
-                                // ---- Stats tab ----
+                                // ---- Stats tab (2K-style career grid) ----
                                 <Show when=move || tab.get() == 1>
-                                    {let live = v.live.clone(); let totals = v.totals.clone(); let career = v.career.clone();
-                                     move || view! {
-                                        {live.clone().map(|pairs| view! {
-                                            <h4 class="pm-section">"This Season"</h4>
-                                            <div class="stat-grid">
-                                                {pairs.into_iter().map(|(k, val)| view! {
-                                                    <div class="stat-cell"><span class="sc-val">{val}</span><span class="sc-key">{k}</span></div>
-                                                }).collect_view()}
-                                            </div>
-                                        })}
-                                        {totals.clone().map(|pairs| view! {
-                                            <h4 class="pm-section">"Career Averages"</h4>
-                                            <div class="stat-grid">
-                                                {pairs.into_iter().map(|(k, val)| view! {
-                                                    <div class="stat-cell"><span class="sc-val">{val}</span><span class="sc-key">{k}</span></div>
-                                                }).collect_view()}
-                                            </div>
-                                        })}
-                                        <h4 class="pm-section">"Season by Season"</h4>
-                                        {if career.is_empty() {
-                                            view! { <p class="empty">"No completed seasons yet."</p> }.into_any()
-                                        } else {
-                                            view! {
-                                                <div class="pm-career-scroll">
+                                    {let stats = v.stats.clone(); move || if stats.is_empty() {
+                                        view! { <p class="empty">"No games played yet."</p> }.into_any()
+                                    } else {
+                                        view! {
+                                            <h4 class="pm-section">"Career Stats"</h4>
+                                            <div class="pm-career-scroll">
                                                 <table class="tbl pm-career">
                                                     <thead><tr>
-                                                        <th>"Yr"</th><th>"Tm"</th><th>"Age"</th><th>"OVR"</th><th>"GP"</th><th>"MPG"</th>
-                                                        <th>"PPG"</th><th>"RPG"</th><th>"APG"</th><th>"SPG"</th><th>"BPG"</th>
-                                                        <th>"FG"</th><th>"3P"</th><th>"FT"</th>
+                                                        <th>"Season"</th><th>"Tm"</th><th>"Age"</th><th>"OVR"</th><th>"GP"</th><th>"MPG"</th>
+                                                        <th>"PPG"</th><th>"RPG"</th><th>"APG"</th><th>"SPG"</th><th>"BPG"</th><th>"TOV"</th>
+                                                        <th>"FG%"</th><th>"3P%"</th><th>"FT%"</th>
                                                     </tr></thead>
                                                     <tbody>
-                                                        {career.clone().into_iter().map(|r| view! {
-                                                            <tr class="row">
-                                                                <td>{r.season}</td><td>{r.team}</td><td>{r.age}</td>
-                                                                <td><span class="ovr">{r.ovr}</span></td><td>{r.gp}</td>
-                                                                <td>{format!("{:.1}", r.mpg)}</td>
-                                                                <td>{format!("{:.1}", r.ppg)}</td>
-                                                                <td>{format!("{:.1}", r.rpg)}</td>
-                                                                <td>{format!("{:.1}", r.apg)}</td>
-                                                                <td>{format!("{:.1}", r.spg)}</td>
-                                                                <td>{format!("{:.1}", r.bpg)}</td>
-                                                                <td>{pct(r.fg)}</td>
-                                                                <td>{pct(r.tp)}</td>
-                                                                <td>{pct(r.ft)}</td>
-                                                            </tr>
+                                                        {stats.clone().into_iter().map(|r| {
+                                                            let cls = if r.total { "row pm-totals" } else { "row" };
+                                                            view! {
+                                                                <tr class=cls>
+                                                                    <td class="left">{r.season}</td><td>{r.team}</td><td>{r.age}</td>
+                                                                    <td>{r.ovr}</td><td>{r.gp}</td>
+                                                                    <td>{format!("{:.1}", r.mpg)}</td>
+                                                                    <td>{format!("{:.1}", r.ppg)}</td>
+                                                                    <td>{format!("{:.1}", r.rpg)}</td>
+                                                                    <td>{format!("{:.1}", r.apg)}</td>
+                                                                    <td>{format!("{:.1}", r.spg)}</td>
+                                                                    <td>{format!("{:.1}", r.bpg)}</td>
+                                                                    <td>{format!("{:.1}", r.tov)}</td>
+                                                                    <td>{pct(r.fg)}</td>
+                                                                    <td>{pct(r.tp)}</td>
+                                                                    <td>{pct(r.ft)}</td>
+                                                                </tr>
+                                                            }
                                                         }).collect_view()}
                                                     </tbody>
                                                 </table>
-                                                </div>
-                                            }.into_any()
-                                        }}
+                                            </div>
+                                        }.into_any()
                                     }}
                                 </Show>
 

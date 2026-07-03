@@ -1,6 +1,6 @@
 //! Shared app state, theme, and browser persistence.
 
-use engine::{League, PlayerId};
+use engine::{League, PlayEvent, PlayerId};
 use leptos::prelude::*;
 
 const SAVE_KEY: &str = "hardwood_gm_save";
@@ -27,6 +27,8 @@ pub struct AppState {
     pub tab: RwSignal<Tab>,
     /// Schedule index of the game being watched in the simcast, if any.
     pub watching: RwSignal<Option<usize>>,
+    /// Play-by-play for the game being watched, computed once when it opens.
+    pub watch_events: StoredValue<Vec<PlayEvent>>,
     /// Id of the player whose detail modal is open, if any.
     pub viewing: RwSignal<Option<PlayerId>>,
 }
@@ -35,6 +37,17 @@ impl AppState {
     /// Mutate the league and persist the result to localStorage.
     pub fn update_league(&self, f: impl FnOnce(&mut League)) {
         self.league.update(f);
+        save_league(&self.league.get_untracked());
+    }
+
+    /// Mutate the league reactively WITHOUT serializing to localStorage. Use for
+    /// high-frequency updates (e.g. dragging a slider); call `persist` on release.
+    pub fn update_league_quiet(&self, f: impl FnOnce(&mut League)) {
+        self.league.update(f);
+    }
+
+    /// Write the current league to localStorage.
+    pub fn persist(&self) {
         save_league(&self.league.get_untracked());
     }
 }

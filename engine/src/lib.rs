@@ -133,6 +133,20 @@ mod integration_tests {
     }
 
     #[test]
+    fn sim_round_walks_the_bracket() {
+        let mut league = League::new(15);
+        league.select_team(0);
+        league.sim_to_end_of_season();
+        league.start_playoffs();
+        // Pressing "Sim Round" four times (with nothing in between) must walk all
+        // four rounds and crown a champion — the old bug stalled after round 1.
+        for _ in 0..4 {
+            league.playoff_sim_round();
+        }
+        assert!(league.playoffs_complete(), "four sim-rounds should finish the bracket");
+    }
+
+    #[test]
     fn trades_respect_value_and_salary() {
         let mut league = League::new(4);
         league.select_team(0);

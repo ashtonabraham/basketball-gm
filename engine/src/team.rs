@@ -17,13 +17,19 @@ pub struct Finances {
     pub training: u32,
     /// Raises attendance and free-agent appeal.
     pub facilities: u32,
-    /// Marketing: raises attendance and fan happiness.
-    pub fan_interest: u32,
-    /// 0..1 fan happiness, updated each season from results.
-    pub fan_happiness: f64,
+    /// Marketing spend: lifts fan interest over time.
+    pub marketing: u32,
+    /// 0..1 persistent fan interest, shown as a % bar. Grows with wins, playoff
+    /// runs, star power, and marketing; drives attendance, merch, and TV money.
+    pub fan_interest: f64,
+    /// Stadium seats (upgradeable).
+    pub capacity: u32,
+    /// Seasons since the arena was built or last renovated.
+    pub stadium_age: u32,
     // Last completed season's booked figures (thousands), for the P&L.
     pub last_attendance: u32,
     pub last_revenue: u32,
+    pub last_merch: u32,
     pub last_expenses: u32,
     pub last_profit: i64,
 }
@@ -36,10 +42,13 @@ impl Default for Finances {
             coaching: 8_000,
             training: 8_000,
             facilities: 8_000,
-            fan_interest: 6_000,
-            fan_happiness: 0.5,
+            marketing: 6_000,
+            fan_interest: 0.5,
+            capacity: 18_000,
+            stadium_age: 8,
             last_attendance: 0,
             last_revenue: 0,
+            last_merch: 0,
             last_expenses: 0,
             last_profit: 0,
         }
@@ -84,9 +93,9 @@ impl Team {
         self.wins + self.losses
     }
 
-    /// Arena capacity, scaled by market size (~16k small .. ~21k big markets).
+    /// Arena capacity (stored; upgradeable via stadium expansion).
     pub fn capacity(&self) -> u32 {
-        (16_000.0 + self.market * 5_000.0) as u32
+        self.finances.capacity
     }
 
     pub fn win_pct(&self) -> f64 {

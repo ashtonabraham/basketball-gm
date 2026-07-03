@@ -24,8 +24,9 @@ pub fn App() -> impl IntoView {
     let dark = RwSignal::new(load_theme());
     let tab = RwSignal::new(Tab::Standings);
     let watching = RwSignal::new(None::<usize>);
+    let watch_events = StoredValue::new(Vec::<engine::PlayEvent>::new());
     let viewing = RwSignal::new(None::<engine::PlayerId>);
-    let state = AppState { league, dark, tab, watching, viewing };
+    let state = AppState { league, dark, tab, watching, watch_events, viewing };
     provide_context(state);
 
     // Persist theme whenever it changes.

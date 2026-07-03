@@ -1,7 +1,7 @@
 //! The "simcast": watch a scheduled game play out possession-by-possession with
 //! a live scoreboard, play-by-play feed, and a live box score.
 
-use crate::state::{save_league, AppState};
+use crate::state::AppState;
 use leptos::prelude::*;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -11,10 +11,9 @@ pub fn SimcastOverlay() -> impl IntoView {
     let state = expect_context::<AppState>();
     let idx = state.watching.get_untracked().unwrap_or(usize::MAX);
 
-    // Play the game once (this applies its result + stats), then we replay the
-    // events visually.
-    let events = state.league.try_update(|l| l.watch_scheduled_game(idx)).flatten().unwrap_or_default();
-    save_league(&state.league.get_untracked());
+    // The game was already simmed once in the click handler; we just replay the
+    // stored events visually here (no league mutation during render).
+    let events = state.watch_events.get_value();
 
     let len = events.len();
     if len == 0 {

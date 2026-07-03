@@ -227,9 +227,15 @@ pub struct FinanceProjection {
     pub capacity: u32,
     /// Average attendance per home game.
     pub attendance: u32,
+    /// Persistent fan interest (0..1), shown as a % bar.
+    pub fan_interest: f64,
+    pub stadium_age: u32,
+    /// True when demand exceeds capacity (turning fans away → expand).
+    pub unmet_demand: bool,
     pub ticket_rev: u32,
     pub concession_rev: u32,
     pub tv_rev: u32,
+    pub merch_rev: u32,
     pub revenue: u32,
     pub payroll: u32,
     /// Sum of the four department budgets.
@@ -410,9 +416,13 @@ impl League {
             let talent = rng.gen_range(38.0..64.0);
             league.generate_roster(*tid, talent, &mut rng);
         }
-        // Give each team a market size (drives arena capacity + TV money).
+        // Give each team a market size (drives TV money + starting arena size)
+        // and a starting fan interest.
         for t in &mut league.teams {
             t.market = rng.gen_range(0.80..1.30);
+            t.finances.capacity = (15_000.0 + t.market * 5_000.0).round() as u32;
+            t.finances.stadium_age = rng.gen_range(2..25);
+            t.finances.fan_interest = rng.gen_range(0.35..0.65);
         }
 
         // Size the season-stats table to match the generated players.
@@ -818,16 +828,21 @@ impl League {
         po.rounds.last().map(|r| r.iter().any(|s| s.has_team(uid))).unwrap_or(false)
     }
 
-    /// Sim game-days until the current round (the deepest at call time) is fully
-    /// decided, then stop before the next round begins.
+    /// Sim the rest of the current round. If the deepest round is already
+    /// decided (e.g. you just finished one), the first game-day advances the
+    /// bracket to the next round and plays it out — so pressing "Sim Round"
+    /// repeatedly walks round by round without needing "Sim Game" in between.
     pub fn playoff_sim_round(&mut self) {
-        let Some(target) = self.playoffs.as_ref().map(|p| p.rounds.len() - 1) else { return };
-        while !self.playoffs_complete() {
-            let cur = self.playoffs.as_ref().unwrap().rounds.len() - 1;
-            if cur == target && self.current_round_decided() {
+        if self.playoffs.is_none() || self.playoffs_complete() {
+            return;
+        }
+        loop {
+            // Always make progress: this plays a game-day, first advancing the
+            // bracket if the current round was already decided.
+            if !self.playoff_sim_gameday() {
                 break;
             }
-            if !self.playoff_sim_gameday() {
+            if self.playoffs_complete() || self.current_round_decided() {
                 break;
             }
         }
@@ -1170,6 +1185,25 @@ impl League {
             body.push_str(&format!(" {} leading us at {:.1} a night was a bright spot.", name, ppg));
         }
 
+        // Business side: profit, fan interest, and the arena situation.
+        let fp = self.project_finances(uid);
+        let fin = &team.finances;
+        if fp.profit < -25_000 {
+            body.push_str(&format!(" On the business side we bled ${:.0}M this year — I can't keep covering losses like that.", (-fp.profit) as f64 / 1000.0));
+        } else if fp.profit > 45_000 {
+            body.push_str(&format!(" The books look terrific too — we cleared ${:.0}M.", fp.profit as f64 / 1000.0));
+        }
+        if fp.unmet_demand {
+            body.push_str(&format!(" And we're selling out {} every night and still turning fans away — it's time we expanded the arena.", fin.capacity));
+        } else if fin.fan_interest < 0.32 {
+            body.push_str(" The fans are tuning out; we need to give this city something to believe in.");
+        } else if fin.fan_interest > 0.82 {
+            body.push_str(" The city is electric — I've never seen fan interest this high.");
+        }
+        if fin.stadium_age >= 25 {
+            body.push_str(&format!(" One more thing: the building is {} years old and showing it — we should look at a renovation.", fin.stadium_age));
+        }
+
         // The ask, or warm words.
         match &goal {
             Some(g) => body.push_str(&format!(" Next season, I want you to {g}.")),
@@ -1184,6 +1218,10 @@ impl League {
 
     /// Record the finished season into history and move to the offseason.
     pub fn finish_season(&mut self) {
+        // Book finances first so the owner's note can speak to this season's
+        // profit, fan interest, and arena situation.
+        self.commit_finances();
+
         // Awards and the owner's note use this season's data; evaluate before
         // pushing history so the owner can compare to last year.
         self.awards = Some(self.compute_awards());
@@ -1203,9 +1241,6 @@ impl League {
                 });
             }
         }
-        // Book the season's finances and refresh fan happiness.
-        self.commit_finances();
-
         // Log this season into every player's career (stat line + honors), so
         // player detail views can show accomplishments over time.
         self.record_careers();
@@ -1898,44 +1933,73 @@ impl League {
         (1.0 + (sum_m - 16.0) * 0.02).clamp(0.8, 1.35)
     }
 
-    /// A team's extra pull in free agency from nice facilities + happy fans.
+    /// A team's extra pull in free agency from nice facilities + engaged fans.
     fn team_fa_bonus(&self, tid: TeamId) -> f64 {
         let Some(t) = self.teams.iter().find(|t| t.id == tid) else { return 0.0 };
         let fac_m = t.finances.facilities as f64 / 1000.0;
-        (fac_m - 8.0) / 8.0 * 0.06 + t.finances.fan_happiness * 0.05
+        (fac_m - 8.0) / 8.0 * 0.06 + t.finances.fan_interest * 0.05
+    }
+
+    /// A single player's jersey sales this season: units + revenue (thousands).
+    /// Driven by star power, scoring, and the team's fan interest + market.
+    pub fn player_jersey_sales(&self, pid: PlayerId) -> (u32, u32) {
+        let Some(p) = self.players.iter().find(|p| p.id == pid) else { return (0, 0) };
+        let Some(tid) = p.team else { return (0, 0) };
+        let Some(t) = self.teams.iter().find(|t| t.id == tid) else { return (0, 0) };
+        let ovr = p.overall() as f64;
+        let ppg = self.season_stats.get(pid as usize).map(|s| s.ppg()).unwrap_or(0.0);
+        let star = (ovr - 60.0).max(0.0);
+        let base = star.powf(1.7) * 200.0 + ppg * 6_000.0;
+        let units = (base * t.finances.fan_interest * t.market).round() as u32;
+        let revenue = units * 110 / 1000; // ~$110/jersey, in thousands
+        (units, revenue)
+    }
+
+    /// Total merch revenue for a team (thousands): player jerseys + team goods.
+    fn team_merch_revenue(&self, tid: TeamId) -> u32 {
+        let Some(t) = self.teams.iter().find(|t| t.id == tid) else { return 0 };
+        let jerseys: u32 = t.roster.iter().map(|pid| self.player_jersey_sales(*pid).1).sum();
+        let team_goods = (t.finances.fan_interest * t.market * 9_000.0) as u32;
+        jerseys + team_goods
     }
 
     /// Compute the full P&L for a team given an assumed win pct (thousands).
     fn finance_calc(&self, tid: TeamId, win_pct: f64) -> FinanceProjection {
         let t = self.teams.iter().find(|t| t.id == tid).expect("team exists");
         let f = &t.finances;
-        let cap = t.capacity();
+        let cap = f.capacity;
         let fac_m = f.facilities as f64 / 1000.0;
-        let fan_m = f.fan_interest as f64 / 1000.0;
-        let demand = (0.55
-            + (win_pct - 0.4) * 0.7
-            + f.fan_happiness * 0.12
+        // Uncapped demand as a fraction of capacity — if it exceeds 1.0 the team
+        // is turning fans away (a signal to expand the arena).
+        let raw_demand = 0.42
+            + f.fan_interest * 0.55
+            + (win_pct - 0.4) * 0.35
             + (fac_m - 8.0) / 8.0 * 0.05
-            + (fan_m - 6.0) / 6.0 * 0.08
-            - (f.ticket_price as f64 - 55.0) / 55.0 * 0.20)
-            .clamp(0.30, 1.0);
+            - (f.ticket_price as f64 - 55.0) / 55.0 * 0.20
+            - (f.stadium_age as f64 - 10.0).max(0.0) / 10.0 * 0.04;
+        let unmet_demand = raw_demand > 1.0;
+        let demand = raw_demand.clamp(0.30, 1.0);
         let attendance = (cap as f64 * demand) as u32;
         let g = Self::HOME_GAMES as f64;
         let gate = attendance as f64 * f.ticket_price as f64 * g / 1000.0;
-        // ~60% of fans buy concessions.
         let conc = attendance as f64 * f.concession_price as f64 * 0.6 * g / 1000.0;
-        let tv = 80_000.0 + t.market * 30_000.0;
-        let revenue = (gate + conc + tv) as u32;
+        let tv = 65_000.0 + t.market * 25_000.0 + f.fan_interest * 15_000.0;
+        let merch = self.team_merch_revenue(tid);
+        let revenue = (gate + conc + tv) as u32 + merch;
         let payroll = self.team_payroll(tid);
-        let budgets = f.coaching + f.training + f.facilities + f.fan_interest;
+        let budgets = f.coaching + f.training + f.facilities + f.marketing;
         let expenses = payroll + budgets;
         let budget = revenue + 15_000 + (t.market * 15_000.0) as u32;
         FinanceProjection {
             capacity: cap,
             attendance,
+            fan_interest: f.fan_interest,
+            stadium_age: f.stadium_age,
+            unmet_demand,
             ticket_rev: gate as u32,
             concession_rev: conc as u32,
             tv_rev: tv as u32,
+            merch_rev: merch,
             revenue,
             payroll,
             budgets,
@@ -1956,9 +2020,27 @@ impl League {
         self.finance_calc(tid, wp)
     }
 
+    /// Jersey-sales leaderboard across the whole league (top sellers first):
+    /// (player id, name, team abbrev, units, revenue-thousands).
+    pub fn league_jersey_leaders(&self, top: usize) -> Vec<(PlayerId, String, String, u32, u32)> {
+        let mut rows: Vec<(PlayerId, String, String, u32, u32)> = self
+            .players
+            .iter()
+            .filter(|p| p.team.is_some())
+            .map(|p| {
+                let (units, rev) = self.player_jersey_sales(p.id);
+                let ab = p.team.and_then(|t| self.teams.iter().find(|x| x.id == t)).map(|t| t.abbrev.clone()).unwrap_or_default();
+                (p.id, p.name.clone(), ab, units, rev)
+            })
+            .collect();
+        rows.sort_by(|a, b| b.3.cmp(&a.3));
+        rows.truncate(top);
+        rows
+    }
+
     /// Update the user team's finance settings (prices + department budgets).
     #[allow(clippy::too_many_arguments)]
-    pub fn set_user_finances(&mut self, ticket: u32, concession: u32, coaching: u32, training: u32, facilities: u32, fan_interest: u32) {
+    pub fn set_user_finances(&mut self, ticket: u32, concession: u32, coaching: u32, training: u32, facilities: u32, marketing: u32) {
         let Some(user) = self.user_team_id else { return };
         if let Some(t) = self.teams.iter_mut().find(|t| t.id == user) {
             let f = &mut t.finances;
@@ -1967,12 +2049,42 @@ impl League {
             f.coaching = coaching.min(40_000);
             f.training = training.min(40_000);
             f.facilities = facilities.min(40_000);
-            f.fan_interest = fan_interest.min(40_000);
+            f.marketing = marketing.min(40_000);
         }
     }
 
-    /// Book the finished season's finances for every team and refresh fan
-    /// happiness from how the year went.
+    /// Cost (thousands) of the next arena expansion, owner-funded.
+    pub fn stadium_upgrade_cost(&self, tid: TeamId) -> u32 {
+        self.teams.iter().find(|t| t.id == tid).map(|t| t.finances.capacity * 12).unwrap_or(0)
+    }
+
+    /// The owner only funds an expansion the team has earned — high fan interest
+    /// or an arena that's already turning fans away.
+    pub fn can_upgrade_stadium(&self, tid: TeamId) -> bool {
+        let Some(t) = self.teams.iter().find(|t| t.id == tid) else { return false };
+        if t.finances.capacity >= 30_000 {
+            return false;
+        }
+        t.finances.fan_interest >= 0.65 || self.project_finances(tid).unmet_demand
+    }
+
+    /// Expand + renovate the user's arena: +3,000 seats and a reset age. Owner
+    /// funded, so it doesn't hit the operating budget. Returns success.
+    pub fn upgrade_stadium(&mut self) -> bool {
+        let Some(user) = self.user_team_id else { return false };
+        if !self.can_upgrade_stadium(user) {
+            return false;
+        }
+        if let Some(t) = self.teams.iter_mut().find(|t| t.id == user) {
+            t.finances.capacity = (t.finances.capacity + 3_000).min(30_000);
+            t.finances.stadium_age = 0;
+            return true;
+        }
+        false
+    }
+
+    /// Book the finished season's finances for every team, drift fan interest
+    /// toward what the year earned, and age every arena.
     fn commit_finances(&mut self) {
         let playoff_teams: std::collections::HashSet<TeamId> =
             playoff_seeds(&self.teams, Conference::East)
@@ -1981,25 +2093,33 @@ impl League {
                 .collect();
         let champ = self.playoffs.as_ref().and_then(|p| p.champion);
 
-        let rows: Vec<(TeamId, FinanceProjection, f64, bool, bool)> = self
+        // (id, proj, win_pct, made_playoffs, is_champ, best_ovr)
+        let rows: Vec<(TeamId, FinanceProjection, f64, bool, bool, u8)> = self
             .teams
             .iter()
             .map(|t| {
                 let wp = if t.games_played() > 0 { t.win_pct() } else { 0.5 };
-                (t.id, self.finance_calc(t.id, wp), wp, playoff_teams.contains(&t.id), champ == Some(t.id))
+                let best = t.roster.iter().filter_map(|pid| self.players.iter().find(|p| p.id == *pid)).map(|p| p.overall()).max().unwrap_or(0);
+                (t.id, self.finance_calc(t.id, wp), wp, playoff_teams.contains(&t.id), champ == Some(t.id), best)
             })
             .collect();
 
-        for (tid, proj, wp, made_po, is_champ) in rows {
+        for (tid, proj, wp, made_po, is_champ, best) in rows {
+            let merch = proj.merch_rev;
             if let Some(t) = self.teams.iter_mut().find(|t| t.id == tid) {
                 let f = &mut t.finances;
                 f.last_attendance = proj.attendance;
                 f.last_revenue = proj.revenue;
+                f.last_merch = merch;
                 f.last_expenses = proj.expenses;
                 f.last_profit = proj.profit;
-                let fan_m = f.fan_interest as f64 / 1000.0;
-                let bonus = if is_champ { 0.15 } else if made_po { 0.08 } else { 0.0 };
-                f.fan_happiness = (0.30 + wp * 0.45 + bonus + (fan_m - 6.0) / 6.0 * 0.05).clamp(0.05, 1.0);
+                f.stadium_age = f.stadium_age.saturating_add(1);
+                // Fan interest drifts (sticky) toward what the season earned.
+                let mkt_m = f.marketing as f64 / 1000.0;
+                let star_bonus = ((best as f64 - 80.0) / 15.0).clamp(0.0, 1.0) * 0.12;
+                let po_bonus = if is_champ { 0.15 } else if made_po { 0.06 } else { 0.0 };
+                let target = (0.28 + wp * 0.40 + po_bonus + star_bonus + (mkt_m - 6.0) / 6.0 * 0.05).clamp(0.05, 1.0);
+                f.fan_interest = (f.fan_interest + (target - f.fan_interest) * 0.5).clamp(0.05, 1.0);
             }
         }
     }

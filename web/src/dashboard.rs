@@ -294,6 +294,19 @@ fn ConferenceTable(conf: Conference, title: &'static str) -> impl IntoView {
     }
 }
 
+/// Sim a scheduled game once (applying its result + stats) and open the simcast
+/// on the resulting play-by-play. Doing the sim here — not inside the overlay —
+/// guarantees it runs exactly once, so the overlay actually stays open.
+fn watch_game(state: AppState, idx: usize) {
+    let mut ev = Vec::new();
+    state.update_league(|l| ev = l.watch_scheduled_game(idx).unwrap_or_default());
+    if ev.is_empty() {
+        return;
+    }
+    state.watch_events.set_value(ev);
+    state.watching.set(Some(idx));
+}
+
 #[component]
 fn SchedulePanel() -> impl IntoView {
     let state = expect_context::<AppState>();
@@ -315,7 +328,7 @@ fn SchedulePanel() -> impl IntoView {
             }).collect::<Vec<_>>()
         })
     };
-    let watch = move |idx: usize| state.watching.set(Some(idx));
+    let watch = move |idx: usize| watch_game(state, idx);
 
     view! {
         <TodaysSlate/>
@@ -363,7 +376,7 @@ fn TodaysSlate() -> impl IntoView {
             }).collect();
         (day + 1, games)
     });
-    let watch = move |idx: usize| state.watching.set(Some(idx));
+    let watch = move |idx: usize| watch_game(state, idx);
 
     view! {
         <Show when=move || !slate().1.is_empty() fallback=|| view! { <span></span> }>
@@ -967,11 +980,39 @@ fn FinancesPanel() -> impl IntoView {
 
     let fin = move || league.with(|l| l.user_team_id.and_then(|id| l.teams.iter().find(|t| t.id == id)).map(|t| t.finances.clone()));
     let proj = move || league.with(|l| l.user_team_id.map(|id| l.project_finances(id)));
-    let commit = move |f: engine::Finances| state.update_league(move |l| {
-        l.set_user_finances(f.ticket_price, f.concession_price, f.coaching, f.training, f.facilities, f.fan_interest);
+    // Quiet update while dragging (live P&L, no serialization); persist on release.
+    let commit = move |f: engine::Finances| state.update_league_quiet(move |l| {
+        l.set_user_finances(f.ticket_price, f.concession_price, f.coaching, f.training, f.facilities, f.marketing);
+    });
+    let persist = move || state.persist();
+
+    // Stadium.
+    let can_up = move || league.with(|l| l.user_team_id.map(|id| l.can_upgrade_stadium(id)).unwrap_or(false));
+    let up_cost = move || league.with(|l| l.user_team_id.map(|id| l.stadium_upgrade_cost(id)).unwrap_or(0));
+    let upgrade = move |_| state.update_league(|l| { l.upgrade_stadium(); });
+
+    // Merchandise: your players' jerseys, your team goods, league top sellers.
+    let merch = move || league.with(|l| {
+        let Some(uid) = l.user_team_id else { return (Vec::new(), 0u32, Vec::new()) };
+        let mut mine: Vec<(u32, String, u32, u32)> = Vec::new();
+        let mut jersey_total = 0u32;
+        if let Some(team) = l.teams.iter().find(|t| t.id == uid) {
+            for pid in &team.roster {
+                let (u, r) = l.player_jersey_sales(*pid);
+                if u == 0 { continue; }
+                let name = l.players.iter().find(|p| p.id == *pid).map(|p| p.name.clone()).unwrap_or_default();
+                jersey_total += r;
+                mine.push((*pid, name, u, r));
+            }
+        }
+        mine.sort_by(|a, b| b.2.cmp(&a.2));
+        let team_goods = l.project_finances(uid).merch_rev.saturating_sub(jersey_total);
+        let leaders: Vec<(String, String, u32, u32)> = l.league_jersey_leaders(10).into_iter().map(|(_, n, ab, u, r)| (n, ab, u, r)).collect();
+        (mine, team_goods, leaders)
     });
 
     let m = |v: u32| format!("${:.1}M", v as f64 / 1000.0);
+    let kfmt = |n: u32| if n >= 1000 { format!("{:.1}k", n as f64 / 1000.0) } else { n.to_string() };
 
     view! {
         <Show when=move || fin().is_some() fallback=|| view! { <div class="card"><p class="empty">"Pick a team first."</p></div> }>
@@ -981,33 +1022,37 @@ fn FinancesPanel() -> impl IntoView {
                     <h3 class="card-title">"Profit & Loss \u{2014} Projected"</h3>
                     {move || proj().map(|p| {
                         let att_pct = if p.capacity > 0 { p.attendance as f64 / p.capacity as f64 * 100.0 } else { 0.0 };
-                        let happy = fin().map(|f| f.fan_happiness).unwrap_or(0.0);
+                        let fi = p.fan_interest * 100.0;
                         let over = p.expenses > p.budget;
                         view! {
                             <div class="fin-att">
                                 <div class="fin-att-top">
-                                    <span>{format!("{} / {} fans", p.attendance, p.capacity)}</span>
+                                    <span>"Fan Interest"</span><span class="dim">{format!("{:.0}%", fi)}</span>
+                                </div>
+                                <div class="fin-bar"><span class="fin-fill" style=format!("width:{}%", fi)></span></div>
+                                <div class="fin-att-top" style="margin-top:.6rem">
+                                    <span>{format!("Attendance {} / {}", p.attendance, p.capacity)}</span>
                                     <span class="dim">{format!("{:.0}% full", att_pct)}</span>
                                 </div>
                                 <div class="fin-bar"><span class="fin-fill" style=format!("width:{}%", att_pct)></span></div>
-                                <div class="fin-att-top" style="margin-top:.6rem">
-                                    <span>"Fan happiness"</span><span class="dim">{format!("{:.0}%", happy * 100.0)}</span>
-                                </div>
-                                <div class="fin-bar"><span class="fin-fill" style=format!("width:{}%", happy * 100.0)></span></div>
+                                {p.unmet_demand.then(|| view! { <p class="fin-warn">"\u{26a0} Selling out and turning fans away \u{2014} expand the arena to capture the demand."</p> })}
                             </div>
                             <table class="tbl fin-pl">
                                 <tbody>
                                     <tr class="row"><td class="left">"Gate receipts"</td><td>{m(p.ticket_rev)}</td></tr>
                                     <tr class="row"><td class="left">"Concessions"</td><td>{m(p.concession_rev)}</td></tr>
+                                    <tr class="row"><td class="left">"Merchandise"</td><td>{m(p.merch_rev)}</td></tr>
                                     <tr class="row"><td class="left">"TV & sponsorship"</td><td>{m(p.tv_rev)}</td></tr>
-                                    <tr class="row fin-sum"><td class="left">"Revenue"</td><td>{m(p.revenue)}</td></tr>
+                                    <tr class="row fin-sum rev"><td class="left">"Revenue"</td><td>{m(p.revenue)}</td></tr>
                                     <tr class="row"><td class="left">"Payroll"</td><td>{m(p.payroll)}</td></tr>
                                     <tr class="row"><td class="left">"Departments"</td><td>{m(p.budgets)}</td></tr>
-                                    <tr class="row fin-sum"><td class="left">"Expenses"</td><td>{m(p.expenses)}</td></tr>
+                                    <tr class="row fin-sum exp"><td class="left">"Expenses"</td><td>{m(p.expenses)}</td></tr>
                                     <tr class="row"><td class="left">"Owner budget"</td><td>{m(p.budget)}</td></tr>
-                                    <tr class={if p.profit >= 0 { "row fin-profit good" } else { "row fin-profit bad" }}>
+                                    <tr class="row fin-profit">
                                         <td class="left">"Projected profit"</td>
-                                        <td>{format!("{}${:.1}M", if p.profit < 0 { "-" } else { "" }, (p.profit.abs() as f64) / 1000.0)}</td>
+                                        <td class={if p.profit >= 0 { "pl-num good" } else { "pl-num bad" }}>
+                                            {format!("{}${:.1}M", if p.profit < 0 { "-" } else { "" }, (p.profit.abs() as f64) / 1000.0)}
+                                        </td>
                                     </tr>
                                 </tbody>
                             </table>
@@ -1025,22 +1070,71 @@ fn FinancesPanel() -> impl IntoView {
                         <label>"Ticket price"</label>
                         <input class="input fin-num" type="number" min="10" max="200" step="1"
                             prop:value=move || fin().map(|f| f.ticket_price).unwrap_or(0)
-                            on:input=move |e| { if let Some(mut f) = fin() { f.ticket_price = event_target_value(&e).parse().unwrap_or(f.ticket_price); commit(f); } }/>
+                            on:input=move |e| { if let Some(mut f) = fin() { f.ticket_price = event_target_value(&e).parse().unwrap_or(f.ticket_price); commit(f); } }
+                            on:change=move |_| persist()/>
                         <span class="fin-unit">"$/seat"</span>
                     </div>
                     <div class="fin-ctl">
                         <label>"Concessions"</label>
                         <input class="input fin-num" type="number" min="5" max="60" step="1"
                             prop:value=move || fin().map(|f| f.concession_price).unwrap_or(0)
-                            on:input=move |e| { if let Some(mut f) = fin() { f.concession_price = event_target_value(&e).parse().unwrap_or(f.concession_price); commit(f); } }/>
+                            on:input=move |e| { if let Some(mut f) = fin() { f.concession_price = event_target_value(&e).parse().unwrap_or(f.concession_price); commit(f); } }
+                            on:change=move |_| persist()/>
                         <span class="fin-unit">"$/fan"</span>
                     </div>
 
                     <div class="fin-group-label">"Department budgets"</div>
-                    {fin_slider("Coaching", "faster player development", fin, commit, Field::Coaching)}
-                    {fin_slider("Training", "faster growth, slower decline", fin, commit, Field::Training)}
-                    {fin_slider("Facilities", "attendance + free-agent appeal", fin, commit, Field::Facilities)}
-                    {fin_slider("Fan Interest", "attendance + fan happiness", fin, commit, Field::FanInterest)}
+                    {fin_slider("Coaching", "faster player development", fin, commit, persist, Field::Coaching)}
+                    {fin_slider("Training", "faster growth, slower decline", fin, commit, persist, Field::Training)}
+                    {fin_slider("Facilities", "attendance + free-agent appeal", fin, commit, persist, Field::Facilities)}
+                    {fin_slider("Marketing", "raises fan interest over time", fin, commit, persist, Field::Marketing)}
+
+                    <div class="fin-group-label">"Stadium"</div>
+                    {move || fin().map(|f| view! {
+                        <div class="fin-stadium">
+                            <div class="fin-stadium-info">{format!("{} seats \u{2022} {} years old", f.capacity, f.stadium_age)}</div>
+                            <button class="btn" disabled=move || !can_up() on:click=upgrade>
+                                {move || format!("Expand +3,000 ({})", m(up_cost()))}
+                            </button>
+                        </div>
+                    })}
+                    <p class="hint">{move || if can_up() { "The owner will fund an expansion.".to_string() } else { "The owner funds an expansion once you've earned it (high fan interest or sellouts).".to_string() }}</p>
+                </div>
+            </div>
+
+            // ===== Merchandise =====
+            <div class="card" style="margin-top:1.25rem">
+                <h3 class="card-title">"Merchandise"</h3>
+                <div class="two-col">
+                    <div>
+                        <div class="fin-group-label">"Your Jersey Sales"</div>
+                        <table class="tbl">
+                            <thead><tr><th class="left">"Player"</th><th>"Units"</th><th>"Revenue"</th></tr></thead>
+                            <tbody>
+                                {move || merch().0.into_iter().map(|(id, name, units, rev)| view! {
+                                    <tr class="row">
+                                        <td class="left"><crate::ui::PlayerLink id=id name=name/></td>
+                                        <td>{kfmt(units)}</td>
+                                        <td>{m(rev)}</td>
+                                    </tr>
+                                }).collect_view()}
+                                <tr class="row fin-sum"><td class="left">"Team goods"</td><td></td><td>{move || m(merch().1)}</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div>
+                        <div class="fin-group-label">"League Top Sellers"</div>
+                        <table class="tbl">
+                            <thead><tr><th>"#"</th><th class="left">"Player"</th><th>"Tm"</th><th>"Units"</th></tr></thead>
+                            <tbody>
+                                {move || merch().2.into_iter().enumerate().map(|(i, (name, ab, units, _r))| view! {
+                                    <tr class="row">
+                                        <td>{i + 1}</td><td class="left">{name}</td><td>{ab}</td><td>{kfmt(units)}</td>
+                                    </tr>
+                                }).collect_view()}
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
         </Show>
@@ -1048,7 +1142,7 @@ fn FinancesPanel() -> impl IntoView {
 }
 
 #[derive(Clone, Copy)]
-enum Field { Coaching, Training, Facilities, FanInterest }
+enum Field { Coaching, Training, Facilities, Marketing }
 
 /// A budget slider in $M (stored as thousands). Higher = better effect, more cost.
 fn fin_slider(
@@ -1056,13 +1150,14 @@ fn fin_slider(
     note: &'static str,
     fin: impl Fn() -> Option<engine::Finances> + Copy + Send + Sync + 'static,
     commit: impl Fn(engine::Finances) + Copy + Send + Sync + 'static,
+    persist: impl Fn() + Copy + Send + Sync + 'static,
     field: Field,
 ) -> impl IntoView {
     let read = move || fin().map(|f| match field {
         Field::Coaching => f.coaching,
         Field::Training => f.training,
         Field::Facilities => f.facilities,
-        Field::FanInterest => f.fan_interest,
+        Field::Marketing => f.marketing,
     }).unwrap_or(0);
     let write = move |v: u32| {
         if let Some(mut f) = fin() {
@@ -1070,7 +1165,7 @@ fn fin_slider(
                 Field::Coaching => f.coaching = v,
                 Field::Training => f.training = v,
                 Field::Facilities => f.facilities = v,
-                Field::FanInterest => f.fan_interest = v,
+                Field::Marketing => f.marketing = v,
             }
             commit(f);
         }
@@ -1083,7 +1178,8 @@ fn fin_slider(
             </div>
             <input class="fin-range" type="range" min="0" max="40" step="0.5"
                 prop:value=move || read() as f64 / 1000.0
-                on:input=move |e| write((event_target_value(&e).parse::<f64>().unwrap_or(0.0) * 1000.0) as u32)/>
+                on:input=move |e| write((event_target_value(&e).parse::<f64>().unwrap_or(0.0) * 1000.0) as u32)
+                on:change=move |_| persist()/>
         </div>
     }
 }
