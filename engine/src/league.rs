@@ -6,7 +6,7 @@
 use crate::draft::{Draft, DraftPick, ScoutEntry};
 use crate::free_agency::{FaOffer, FreeAgency};
 use crate::names::{FIRST_NAMES, LAST_NAMES};
-use crate::player::{Career, CareerSeason, Contract, Honor, HonorEntry, Player, Ratings, SeasonStats};
+use crate::player::{Career, CareerSeason, Contract, Honor, HonorEntry, Player, PlayerTrait, Ratings, SeasonStats};
 use crate::playoffs::{first_round_pairs, high_seed_hosts, Playoffs, Series};
 use crate::schedule::{generate_schedule, Game, GameResult};
 use crate::sim::{simulate_game, simulate_game_pbp, PlayEvent, TeamBox};
@@ -55,6 +55,24 @@ fn gen_ratings(pos: Position, talent: f64, rng: &mut impl Rng) -> Ratings {
         rebounding: attr(m[13], rng),
         athleticism: attr(m[14], rng),
         stamina: attr(m[15], rng),
+    }
+}
+
+/// Pick a personality trait. "Professional" is the most common; the flashier
+/// traits (Leader, Fan Favorite, Hothead...) are rarer, so a locker room feels
+/// distinct rather than uniform.
+fn gen_personality(rng: &mut impl Rng) -> PlayerTrait {
+    // Weighted: Professional common, others sprinkled in.
+    let roll = rng.gen_range(0..100);
+    match roll {
+        0..=31 => PlayerTrait::Professional,
+        32..=44 => PlayerTrait::Loyal,
+        45..=57 => PlayerTrait::GymRat,
+        58..=69 => PlayerTrait::Mercenary,
+        70..=79 => PlayerTrait::Leader,
+        80..=88 => PlayerTrait::Hothead,
+        89..=95 => PlayerTrait::Mentor,
+        _ => PlayerTrait::FanFavorite,
     }
 }
 
@@ -127,6 +145,15 @@ fn apply_attr_delta(r: &mut Ratings, d: i32, rng: &mut impl Rng) {
 /// `dev_factor` (~0.8..1.35) comes from the player's team's coaching + training
 /// budgets: it scales up growth and softens decline.
 fn develop_player(p: &mut Player, rng: &mut impl Rng, dev_factor: f64) {
+    // Personality + morale shape growth: gym rats fly up, and a happy player
+    // develops faster than a disgruntled one.
+    let trait_mult = match p.personality {
+        PlayerTrait::GymRat => 1.30,
+        PlayerTrait::Mentor => 1.05,
+        PlayerTrait::Hothead => 0.92,
+        _ => 1.0,
+    };
+    let dev_factor = dev_factor * trait_mult * (0.85 + p.morale * 0.30);
     let ovr = p.overall();
     if p.age <= 26 && ovr < p.potential {
         let room = (p.potential - ovr) as f64;
@@ -512,7 +539,11 @@ impl League {
         // Initial contracts: market value with a little spread, 1–4 years left.
         let salary = (market_salary(ratings.overall()) as f64 * rng.gen_range(0.85..1.15)).round() as u32;
         let contract = Contract { salary: salary.clamp(MIN_SALARY, 48_000), years: rng.gen_range(1..=4) };
-        Player { id, name, age, position: pos, ratings, potential, team: Some(team_id), draft_season: None, contract }
+        Player {
+            id, name, age, position: pos, ratings, potential,
+            personality: gen_personality(rng), morale: rng.gen_range(0.45..0.70),
+            team: Some(team_id), draft_season: None, contract,
+        }
     }
 
     // ---- Regular season ----
@@ -1100,15 +1131,21 @@ impl League {
         let city = team.location.clone();
         let champ = self.playoffs.as_ref().and_then(|p| p.champion);
 
-        // Hands-off while you build (first three seasons).
+        // Hands-off while you build (first three seasons) — but a strong year
+        // still earns a tip of the cap.
         if self.season <= 3 {
-            return OwnerMessage {
-                tone: OwnerTone::TooEarly,
-                body: format!(
-                    "It's only year {}. I'm not going to judge you yet — take your time and build me something special.",
-                    self.season
-                ),
+            let outcome = self.outcome_for(uid);
+            let deep_run = matches!(outcome, PlayoffOutcome::LostInRound(2) | PlayoffOutcome::LostInRound(3));
+            let title = champ == Some(uid);
+            let great = team.win_pct() >= 0.60;
+            let body = if title {
+                format!("A title already, in year {}?! It's early days and I won't put any pressure on you yet — but my word, what a start. Great job this year.", self.season)
+            } else if deep_run || great {
+                format!("It's only year {}, so I'm not judging you yet — but a {}-{} season and a real run was a hell of a job. Keep building, and great job this year.", self.season, team.wins, team.losses)
+            } else {
+                format!("It's only year {}. I'm not going to judge you yet — take your time and build me something special.", self.season)
             };
+            return OwnerMessage { tone: OwnerTone::TooEarly, body };
         }
 
         // A title earns the warmest words.
@@ -1222,6 +1259,9 @@ impl League {
         // profit, fan interest, and arena situation.
         self.commit_finances();
 
+        // Update every player's morale from how their season went.
+        self.update_morale();
+
         // Awards and the owner's note use this season's data; evaluate before
         // pushing history so the owner can compare to last year.
         self.awards = Some(self.compute_awards());
@@ -1301,6 +1341,79 @@ impl League {
         self.careers.get(&pid)
     }
 
+    // ---- Morale & the locker room ----
+
+    /// Drift every rostered player's morale toward what their season earned:
+    /// winning, playoff success, a fair role (minutes vs. what his talent
+    /// expects), fair pay, and his personality all feed in.
+    fn update_morale(&mut self) {
+        let playoff_teams: std::collections::HashSet<TeamId> =
+            playoff_seeds(&self.teams, Conference::East)
+                .into_iter()
+                .chain(playoff_seeds(&self.teams, Conference::West))
+                .collect();
+        let champ = self.playoffs.as_ref().and_then(|p| p.champion);
+        let ctx: HashMap<TeamId, (f64, bool, bool)> = self
+            .teams
+            .iter()
+            .map(|t| {
+                let wp = if t.games_played() > 0 { t.win_pct() } else { 0.5 };
+                (t.id, (wp, playoff_teams.contains(&t.id), champ == Some(t.id)))
+            })
+            .collect();
+
+        let mut updates: Vec<(PlayerId, f64)> = Vec::new();
+        for p in &self.players {
+            let Some(tid) = p.team else { continue };
+            let (wp, made_po, is_champ) = ctx[&tid];
+            let ovr = p.overall();
+            let s = &self.season_stats[p.id as usize];
+            // Role: minutes vs. what a player of his ability expects.
+            let expected = ((ovr as f64 - 55.0) * 0.9 + 18.0).clamp(8.0, 36.0);
+            let role = ((s.mpg() - expected) / 14.0).clamp(-0.28, 0.12);
+            // Pay fairness relative to market.
+            let mkt = market_salary(ovr).max(1) as f64;
+            let pay = ((p.contract.salary as f64 - mkt) / mkt).clamp(-0.6, 0.6) * 0.12;
+            let po = if is_champ { 0.22 } else if made_po { 0.06 } else { -0.07 };
+
+            let mut target = 0.5 + (wp - 0.5) * 0.5 + po + role + pay;
+            match p.personality {
+                PlayerTrait::Loyal | PlayerTrait::Professional => target = target * 0.6 + 0.62 * 0.4,
+                PlayerTrait::Mercenary => target += (wp - 0.5) * 0.30 + pay,
+                PlayerTrait::Hothead => { target -= 0.05; if wp < 0.4 { target -= 0.10; } }
+                PlayerTrait::Leader => { if wp >= 0.5 { target += 0.05; } else { target -= 0.03; } }
+                _ => {}
+            }
+            let target = target.clamp(0.05, 1.0);
+            let m = (p.morale + (target - p.morale) * 0.5).clamp(0.05, 1.0);
+            updates.push((p.id, m));
+        }
+        for (pid, m) in updates {
+            if let Some(p) = self.players.iter_mut().find(|p| p.id == pid) {
+                p.morale = m;
+            }
+        }
+    }
+
+    /// Players on the user's team who are unhappy enough to want out. These are
+    /// the GM's problems to solve (trade them, or turn the season around).
+    pub fn trade_requests(&self) -> Vec<PlayerId> {
+        let Some(user) = self.user_team_id else { return Vec::new() };
+        let Some(team) = self.teams.iter().find(|t| t.id == user) else { return Vec::new() };
+        let mut v: Vec<PlayerId> = team
+            .roster
+            .iter()
+            .copied()
+            .filter(|pid| self.players.iter().find(|p| p.id == *pid).map(|p| p.morale < 0.30).unwrap_or(false))
+            .collect();
+        v.sort_by(|a, b| {
+            let va = self.players.iter().find(|p| p.id == *a).map(|p| p.overall()).unwrap_or(0);
+            let vb = self.players.iter().find(|p| p.id == *b).map(|p| p.overall()).unwrap_or(0);
+            vb.cmp(&va)
+        });
+        v
+    }
+
     // ---- Draft ----
 
     /// Generate a prospect class and the lottery-seeded 2-round draft order,
@@ -1336,6 +1449,8 @@ impl League {
                 position: pos,
                 ratings,
                 potential,
+                personality: gen_personality(&mut rng),
+                morale: 0.6,
                 team: None,
                 draft_season: None,
                 contract: Contract::free_agent(),
@@ -1477,6 +1592,33 @@ impl League {
         }
         if let Some(t) = self.teams.iter_mut().find(|t| t.id == team_id) {
             t.roster.push(player_id);
+        }
+        // Drafting onto a full roster forces a cut of the weakest player — but
+        // never the rookie you just took.
+        self.enforce_roster_limit(team_id, Some(player_id));
+    }
+
+    /// If a team is over the 15-man limit (e.g. after drafting), waive its
+    /// lowest-overall player(s); they become free agents. `keep` is never cut.
+    fn enforce_roster_limit(&mut self, tid: TeamId, keep: Option<PlayerId>) {
+        loop {
+            let over = self.teams.iter().find(|t| t.id == tid).map(|t| t.roster.len() > Self::ROSTER_MAX).unwrap_or(false);
+            if !over {
+                break;
+            }
+            let worst = self
+                .teams
+                .iter()
+                .find(|t| t.id == tid)
+                .and_then(|t| t.roster.iter().copied().filter(|pid| Some(*pid) != keep).min_by_key(|pid| self.players.iter().find(|p| p.id == *pid).map(|p| p.overall()).unwrap_or(0)));
+            let Some(worst) = worst else { break };
+            if let Some(t) = self.teams.iter_mut().find(|t| t.id == tid) {
+                t.roster.retain(|x| *x != worst);
+            }
+            if let Some(p) = self.players.iter_mut().find(|p| p.id == worst) {
+                p.team = None;
+                p.contract = Contract::free_agent();
+            }
         }
     }
 
@@ -1930,7 +2072,11 @@ impl League {
     fn team_dev_factor(&self, tid: TeamId) -> f64 {
         let Some(t) = self.teams.iter().find(|t| t.id == tid) else { return 1.0 };
         let sum_m = (t.finances.coaching + t.finances.training) as f64 / 1000.0;
-        (1.0 + (sum_m - 16.0) * 0.02).clamp(0.8, 1.35)
+        let base = (1.0 + (sum_m - 16.0) * 0.02).clamp(0.8, 1.35);
+        // A mentor (or leader) in the room helps everyone grow.
+        let has = |tr: PlayerTrait| t.roster.iter().filter_map(|pid| self.players.iter().find(|p| p.id == *pid)).any(|p| p.personality == tr);
+        let mentor_bonus = if has(PlayerTrait::Mentor) { 0.08 } else { 0.0 } + if has(PlayerTrait::Leader) { 0.04 } else { 0.0 };
+        base + mentor_bonus
     }
 
     /// A team's extra pull in free agency from nice facilities + engaged fans.
@@ -1950,7 +2096,9 @@ impl League {
         let ppg = self.season_stats.get(pid as usize).map(|s| s.ppg()).unwrap_or(0.0);
         let star = (ovr - 60.0).max(0.0);
         let base = star.powf(1.7) * 200.0 + ppg * 6_000.0;
-        let units = (base * t.finances.fan_interest * t.market).round() as u32;
+        // A fan favorite moves a lot more merch.
+        let fav = if p.personality == PlayerTrait::FanFavorite { 1.45 } else { 1.0 };
+        let units = (base * fav * t.finances.fan_interest * t.market).round() as u32;
         let revenue = units * 110 / 1000; // ~$110/jersey, in thousands
         (units, revenue)
     }
@@ -2053,31 +2201,44 @@ impl League {
         }
     }
 
-    /// Cost (thousands) of the next arena expansion, owner-funded.
+    /// Seats the next expansion adds. Escalates each time: 3,000 for the first,
+    /// then 10,000, 15,000, 20,000, ... so every expansion is a bigger project.
+    pub fn stadium_next_add(&self, tid: TeamId) -> u32 {
+        let n = self.teams.iter().find(|t| t.id == tid).map(|t| t.finances.stadium_upgrades).unwrap_or(0);
+        if n == 0 { 3_000 } else { 5_000 * (n + 1) }
+    }
+
+    const STADIUM_MAX: u32 = 55_000;
+
+    /// Cost (thousands) of the next arena expansion, owner-funded. Scales with
+    /// current size and the size of the addition, so it goes up every time.
     pub fn stadium_upgrade_cost(&self, tid: TeamId) -> u32 {
-        self.teams.iter().find(|t| t.id == tid).map(|t| t.finances.capacity * 12).unwrap_or(0)
+        let Some(t) = self.teams.iter().find(|t| t.id == tid) else { return 0 };
+        t.finances.capacity * 10 + self.stadium_next_add(tid) * 14
     }
 
     /// The owner only funds an expansion the team has earned — high fan interest
     /// or an arena that's already turning fans away.
     pub fn can_upgrade_stadium(&self, tid: TeamId) -> bool {
         let Some(t) = self.teams.iter().find(|t| t.id == tid) else { return false };
-        if t.finances.capacity >= 30_000 {
+        if t.finances.capacity >= Self::STADIUM_MAX {
             return false;
         }
         t.finances.fan_interest >= 0.65 || self.project_finances(tid).unmet_demand
     }
 
-    /// Expand + renovate the user's arena: +3,000 seats and a reset age. Owner
-    /// funded, so it doesn't hit the operating budget. Returns success.
+    /// Expand + renovate the user's arena by the (escalating) next-add amount and
+    /// reset its age. Owner funded, so it doesn't hit the operating budget.
     pub fn upgrade_stadium(&mut self) -> bool {
         let Some(user) = self.user_team_id else { return false };
         if !self.can_upgrade_stadium(user) {
             return false;
         }
+        let add = self.stadium_next_add(user);
         if let Some(t) = self.teams.iter_mut().find(|t| t.id == user) {
-            t.finances.capacity = (t.finances.capacity + 3_000).min(30_000);
+            t.finances.capacity = (t.finances.capacity + add).min(Self::STADIUM_MAX);
             t.finances.stadium_age = 0;
+            t.finances.stadium_upgrades += 1;
             return true;
         }
         false

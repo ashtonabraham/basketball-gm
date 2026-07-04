@@ -476,13 +476,20 @@ fn RosterPanel() -> impl IntoView {
                     let r = &p.ratings;
                     (p.id, p.name.clone(), p.position.abbrev(), p.age, p.overall(), p.potential,
                      p.contract.salary_str(), p.contract.years,
-                     r.inside(), r.outside(), r.playmaking(), r.defending(), r.athletic())
+                     r.inside(), r.outside(), r.playmaking(), r.defending(), r.athletic(),
+                     p.morale, p.personality.label(), p.morale < 0.30)
                 })
                 .collect();
             ps.sort_by(|a, b| b.4.cmp(&a.4));
             ps
         })
     };
+    // Unhappy players who want out.
+    let requests = move || state.league.with(|l| {
+        l.trade_requests().into_iter().filter_map(|pid| {
+            l.players.iter().find(|p| p.id == pid).map(|p| (pid, format!("{} ({})", p.name, p.personality.label())))
+        }).collect::<Vec<_>>()
+    });
     let cap = move || {
         state.league.with(|l| {
             let Some(id) = l.user_team_id else { return (0.0, 0.0, 0.0, 0usize) };
@@ -508,16 +515,27 @@ fn RosterPanel() -> impl IntoView {
                     </div>
                 }}}
             </div>
+            <Show when=move || !requests().is_empty()>
+                <div class="trade-req-banner">
+                    <b>"\u{26a0} Trade requests: "</b>
+                    {move || requests().into_iter().map(|(id, label)| view! {
+                        <crate::ui::PlayerLink id=id name=label/>
+                    }).collect_view()}
+                    <span class="dim">" \u{2014} unhappy players want out. Move them or turn the season around."</span>
+                </div>
+            </Show>
             <table class="tbl">
                 <thead><tr>
                     <th class="left">"Player"</th><th>"Pos"</th><th>"Age"</th><th>"OVR"</th>
                     <th title="Potential (peak overall)">"POT"</th>
+                    <th title="Personality">"Trait"</th><th title="Morale">"Mood"</th>
                     <th title="Salary">"Salary"</th><th title="Years left">"Yrs"</th>
                     <th title="Inside scoring">"INS"</th><th title="Outside shooting">"OUT"</th>
                     <th title="Playmaking">"PMK"</th><th title="Defense">"DEF"</th><th title="Physical">"ATH"</th>
                 </tr></thead>
                 <tbody>
-                    {move || players().into_iter().map(|(id, name, pos, age, ovr, pot, salary, years, ins, out, plm, def, ath)| {
+                    {move || players().into_iter().map(|(id, name, pos, age, ovr, pot, salary, years, ins, out, plm, def, ath, morale, trait_label, wants)| {
+                        let mood_cls = if morale >= 0.6 { "morale-fill hi" } else if morale >= 0.35 { "morale-fill mid" } else { "morale-fill lo" };
                         view! {
                             <tr class="row">
                                 <td class="left"><crate::ui::PlayerLink id=id name=name/></td>
@@ -525,6 +543,12 @@ fn RosterPanel() -> impl IntoView {
                                 <td>{age}</td>
                                 <td><span class="ovr">{ovr}</span></td>
                                 <td>{pot}</td>
+                                <td class="trait-cell">{trait_label}{wants.then(|| " \u{26a0}")}</td>
+                                <td>
+                                    <span class="morale-bar sm" title=format!("{:.0}% morale", morale * 100.0)>
+                                        <span class=mood_cls style=format!("width:{}%", (morale * 100.0).round())></span>
+                                    </span>
+                                </td>
                                 <td>{salary}</td><td>{years}</td>
                                 <td>{ins}</td><td>{out}</td><td>{plm}</td><td>{def}</td><td>{ath}</td>
                             </tr>
@@ -1056,6 +1080,7 @@ fn FinancesPanel() -> impl IntoView {
     // Stadium.
     let can_up = move || league.with(|l| l.user_team_id.map(|id| l.can_upgrade_stadium(id)).unwrap_or(false));
     let up_cost = move || league.with(|l| l.user_team_id.map(|id| l.stadium_upgrade_cost(id)).unwrap_or(0));
+    let next_add = move || league.with(|l| l.user_team_id.map(|id| l.stadium_next_add(id)).unwrap_or(0));
     let upgrade = move |_| state.update_league(|l| { l.upgrade_stadium(); });
 
     // Merchandise: your players' jerseys, your team goods, league top sellers.
@@ -1161,7 +1186,7 @@ fn FinancesPanel() -> impl IntoView {
                         <div class="fin-stadium">
                             <div class="fin-stadium-info">{format!("{} seats \u{2022} {} years old", f.capacity, f.stadium_age)}</div>
                             <button class="btn" disabled=move || !can_up() on:click=upgrade>
-                                {move || format!("Expand +3,000 ({})", m(up_cost()))}
+                                {move || format!("Expand +{} ({})", next_add(), m(up_cost()))}
                             </button>
                         </div>
                     })}

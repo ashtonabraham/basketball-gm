@@ -134,6 +134,67 @@ impl Contract {
     }
 }
 
+/// A player's personality — a single defining trait that gives the roster human
+/// texture and real consequences (development, locker-room chemistry, morale,
+/// merch, and trade demands).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlayerTrait {
+    /// Lifts team chemistry and teammates; morale rides on winning.
+    Leader,
+    /// Steady, content, sticks around; morale barely wavers.
+    Loyal,
+    /// Chases money and winning; sours fast when losing or underpaid.
+    Mercenary,
+    /// Volatile; a losing locker room drags him (and the team) down.
+    Hothead,
+    /// Relentless worker — develops noticeably faster.
+    GymRat,
+    /// Makes the young players around him better.
+    Mentor,
+    /// A magnet for the fanbase — sells jerseys, lifts fan interest.
+    FanFavorite,
+    /// Even-keeled pro; coachable, no drama.
+    Professional,
+}
+
+impl PlayerTrait {
+    pub const ALL: [PlayerTrait; 8] = [
+        PlayerTrait::Leader, PlayerTrait::Loyal, PlayerTrait::Mercenary, PlayerTrait::Hothead,
+        PlayerTrait::GymRat, PlayerTrait::Mentor, PlayerTrait::FanFavorite, PlayerTrait::Professional,
+    ];
+    pub fn label(&self) -> &'static str {
+        match self {
+            PlayerTrait::Leader => "Leader",
+            PlayerTrait::Loyal => "Loyal",
+            PlayerTrait::Mercenary => "Mercenary",
+            PlayerTrait::Hothead => "Hothead",
+            PlayerTrait::GymRat => "Gym Rat",
+            PlayerTrait::Mentor => "Mentor",
+            PlayerTrait::FanFavorite => "Fan Favorite",
+            PlayerTrait::Professional => "Professional",
+        }
+    }
+    pub fn blurb(&self) -> &'static str {
+        match self {
+            PlayerTrait::Leader => "Lifts the locker room; his mood follows winning.",
+            PlayerTrait::Loyal => "Content and steady — rarely rocks the boat.",
+            PlayerTrait::Mercenary => "In it for money and rings; sours quickly otherwise.",
+            PlayerTrait::Hothead => "Volatile — a losing culture drags him and the team down.",
+            PlayerTrait::GymRat => "Outworks everyone; develops faster than his peers.",
+            PlayerTrait::Mentor => "Makes the young players around him better.",
+            PlayerTrait::FanFavorite => "The city loves him — sells jerseys and fills seats.",
+            PlayerTrait::Professional => "Even-keeled and coachable; no drama.",
+        }
+    }
+}
+
+fn default_trait() -> PlayerTrait {
+    PlayerTrait::Professional
+}
+fn default_morale() -> f64 {
+    0.55
+}
+
 /// A player.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Player {
@@ -142,6 +203,12 @@ pub struct Player {
     pub age: u8,
     pub position: Position,
     pub ratings: Ratings,
+    /// Defining personality trait.
+    #[serde(default = "default_trait")]
+    pub personality: PlayerTrait,
+    /// 0..1 morale (happiness). Low morale hurts play and can trigger a trade request.
+    #[serde(default = "default_morale")]
+    pub morale: f64,
     /// True peak overall this player can reach (the development ceiling). This
     /// is the exact value shown on rosters; for undrafted prospects it is
     /// hidden behind a scouted letter grade.

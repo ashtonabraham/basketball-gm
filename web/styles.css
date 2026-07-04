@@ -595,3 +595,29 @@ body {
 .fin-stadium-info { font-weight: 600; font-size: .9rem; }
 .fin-stadium .btn { padding: .4rem .7rem; font-size: .82rem; }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+/* ---- Personality & morale ---- */
+.pm-persona { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; margin: .9rem 0 .25rem; }
+.trait-chip {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--text); font-weight: 800; font-size: .74rem; padding: .25rem .6rem; border-radius: 999px; cursor: help;
+}
+.morale-wrap { display: inline-flex; align-items: center; gap: .5rem; font-size: .8rem; color: var(--muted); }
+.morale-bar { display: inline-block; width: 90px; height: 8px; border-radius: 999px; background: var(--panel-2); overflow: hidden; vertical-align: middle; }
+.morale-bar.sm { width: 54px; height: 7px; }
+.morale-fill { display: block; height: 100%; border-radius: 999px; }
+.morale-fill.hi { background: #2faa55; }
+.morale-fill.mid { background: #e0955a; }
+.morale-fill.lo { background: #e0413a; }
+.morale-pct { font-weight: 700; color: var(--text); }
+.trade-flag { color: #e0413a; font-weight: 800; font-size: .78rem; }
+.trait-cell { font-size: .78rem; color: var(--muted); white-space: nowrap; }
+.trade-req-banner {
+  background: color-mix(in srgb, #e0413a 12%, transparent);
+  border: 1px solid color-mix(in srgb, #e0413a 40%, transparent);
+  border-radius: 10px; padding: .6rem .8rem; margin-bottom: .9rem; font-size: .85rem;
+  display: flex; align-items: center; gap: .5rem; flex-wrap: wrap;
+}
+.trade-req-banner .plink { margin-right: .3rem; }
+.trade-req-banner .dim { color: var(--muted); }

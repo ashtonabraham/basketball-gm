@@ -26,6 +26,9 @@ pub struct Finances {
     pub capacity: u32,
     /// Seasons since the arena was built or last renovated.
     pub stadium_age: u32,
+    /// How many expansions have been done (each one adds more seats + costs more).
+    #[serde(default)]
+    pub stadium_upgrades: u32,
     // Last completed season's booked figures (thousands), for the P&L.
     pub last_attendance: u32,
     pub last_revenue: u32,
@@ -46,6 +49,7 @@ impl Default for Finances {
             fan_interest: 0.5,
             capacity: 18_000,
             stadium_age: 8,
+            stadium_upgrades: 0,
             last_attendance: 0,
             last_revenue: 0,
             last_merch: 0,

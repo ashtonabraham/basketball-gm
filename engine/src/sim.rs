@@ -18,7 +18,7 @@
 //! The output is a full per-player box score, so attributes flow all the way
 //! through to individual stats and the final score.
 
-use crate::player::Player;
+use crate::player::{Player, PlayerTrait};
 use crate::team::Team;
 use crate::types::{PlayerId, TeamId};
 use rand::Rng;
@@ -77,6 +77,7 @@ struct Rotation<'a> {
     team_int_def: f64,      // minutes-weighted interior defense
     team_perim_def: f64,    // minutes-weighted perimeter defense
     team_reb: f64,          // minutes-weighted rebounding rating
+    chem: f64,              // locker-room chemistry nudge to shot-making (±)
 }
 
 impl<'a> Rotation<'a> {
@@ -131,13 +132,24 @@ impl<'a> Rotation<'a> {
         let team_perim_def = mwavg(&|p| p.ratings.perimeter_defense as f64);
         let team_reb = mwavg(&|p| p.ratings.rebounding as f64);
 
+        // Locker-room chemistry: happy rooms and leaders play a touch better;
+        // hotheads and unhappy stars drag the team down. Small but real.
+        let n = roster.len().max(1);
+        let avg_morale = roster.iter().map(|p| p.morale).sum::<f64>() / n as f64;
+        let mut chem = (avg_morale - 0.5) * 0.06;
+        if roster.iter().any(|p| p.personality == PlayerTrait::Leader) {
+            chem += 0.01;
+        }
+        chem -= roster.iter().filter(|p| p.personality == PlayerTrait::Hothead).count() as f64 * 0.006;
+        let chem = chem.clamp(-0.04, 0.04);
+
         let lines = roster
             .iter()
             .zip(&minutes)
             .map(|(p, m)| PlayerLine { player_id: p.id, min: m.round() as u32, ..Default::default() })
             .collect();
 
-        Rotation { players: roster, lines, usage, reb_weight, ast_weight, steal_weight, block_weight, team_int_def, team_perim_def, team_reb }
+        Rotation { players: roster, lines, usage, reb_weight, ast_weight, steal_weight, block_weight, team_int_def, team_perim_def, team_reb, chem }
     }
 }
 
@@ -382,7 +394,7 @@ fn resolve_possession(
         off.lines[shooter].tpa += 1;
         // Elite shooters land ~40% from deep; league ~35%. Contested by the
         // defense's perimeter D.
-        let p = (0.335 + (r.three as f64 - 55.0) * 0.004 - (def_perim - 50.0) * 0.0035 + home_edge)
+        let p = (0.335 + (r.three as f64 - 55.0) * 0.004 - (def_perim - 50.0) * 0.0035 + home_edge + off.chem)
             .clamp(0.18, 0.46);
         let made = rng.gen::<f64>() < p;
         if made {
@@ -391,12 +403,12 @@ fn resolve_possession(
         (made, 3u32, 0.82, PlayKind::Three)
     } else if is_mid {
         // Mid-range two, contested on the perimeter.
-        let p = (0.40 + (r.mid_range as f64 - 55.0) * 0.004 - (def_perim - 50.0) * 0.003 + home_edge)
+        let p = (0.40 + (r.mid_range as f64 - 55.0) * 0.004 - (def_perim - 50.0) * 0.003 + home_edge + off.chem)
             .clamp(0.25, 0.55);
         (rng.gen::<f64>() < p, 2u32, 0.45, PlayKind::MidRange)
     } else if r.post >= 60 && r.post > r.ball_handling && rng.gen::<f64>() < 0.5 {
         // Post-up: back-to-the-basket scoring, contested by interior D.
-        let p = (0.50 + (r.post as f64 - 60.0) * 0.0028 - (def_int - 50.0) * 0.0035 + home_edge)
+        let p = (0.50 + (r.post as f64 - 60.0) * 0.0028 - (def_int - 50.0) * 0.0035 + home_edge + off.chem)
             .clamp(0.22, 0.72);
         (rng.gen::<f64>() < p, 2u32, 0.40, PlayKind::Post)
     } else {
@@ -408,7 +420,7 @@ fn resolve_possession(
         let finish = if dunk { r.dunk } else { r.layup } as f64;
         // Dunks convert high; layups are around the low-50s for good finishers.
         let base = if dunk { 0.68 } else { 0.52 };
-        let p = (base + (finish - 60.0) * 0.0028 + drive_adv * 0.0028 - (def_int - 50.0) * 0.0035 + home_edge)
+        let p = (base + (finish - 60.0) * 0.0028 + drive_adv * 0.0028 - (def_int - 50.0) * 0.0035 + home_edge + off.chem)
             .clamp(0.20, 0.76);
         (rng.gen::<f64>() < p, 2u32, 0.55, if dunk { PlayKind::Dunk } else { PlayKind::Layup })
     };

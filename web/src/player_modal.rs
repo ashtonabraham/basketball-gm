@@ -76,6 +76,10 @@ struct PView {
     pot: u8,
     salary: String,
     years: u8,
+    trait_label: &'static str,
+    trait_blurb: &'static str,
+    morale: f64,
+    wants_trade: bool,
     groups: Vec<Group>,
     stats: Vec<StatRow>,
     honors_badges: Vec<String>,
@@ -204,6 +208,10 @@ pub fn PlayerModal() -> impl IntoView {
                 pot: p.potential,
                 salary: if p.contract.years > 0 { p.contract.salary_str() } else { "\u{2014}".into() },
                 years: p.contract.years,
+                trait_label: p.personality.label(),
+                trait_blurb: p.personality.blurb(),
+                morale: p.morale,
+                wants_trade: p.team.is_some() && p.morale < 0.30,
                 groups,
                 stats,
                 honors_badges,
@@ -243,6 +251,21 @@ pub fn PlayerModal() -> impl IntoView {
                                             </span>
                                         </div>
                                     </div>
+                                </div>
+
+                                <div class="pm-persona">
+                                    <span class="trait-chip" title=v.trait_blurb>{v.trait_label}</span>
+                                    <span class="morale-wrap">
+                                        <span class="morale-label">"Morale"</span>
+                                        <span class="morale-bar">
+                                            <span class=move || {
+                                                let lvl = if v.morale >= 0.6 { "morale-fill hi" } else if v.morale >= 0.35 { "morale-fill mid" } else { "morale-fill lo" };
+                                                lvl
+                                            } style=format!("width:{}%", (v.morale * 100.0).round())></span>
+                                        </span>
+                                        <span class="morale-pct">{format!("{:.0}%", v.morale * 100.0)}</span>
+                                    </span>
+                                    {v.wants_trade.then(|| view! { <span class="trade-flag">"\u{26a0} Wants a trade"</span> })}
                                 </div>
 
                                 <div class="pm-tabs">
