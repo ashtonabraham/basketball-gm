@@ -2165,9 +2165,10 @@ impl League {
     #[allow(clippy::too_many_arguments)]
     fn fa_appeal(salary: u32, years: u8, market: f64, star: f64, team_strength: f64, league_avg: f64, taste: f64) -> f64 {
         let ratio = (salary as f64 / market).min(1.6);
-        let money_appeal = ratio * (1.0 - 0.35 * star);
+        // Money matters much less to stars — they chase winning, not the last dollar.
+        let money_appeal = ratio * (1.0 - 0.40 * star);
         let str_norm = (team_strength - league_avg) / 20.0; // ~±0.5
-        let contention = str_norm * (0.4 + 1.2 * star);
+        let contention = str_norm * (0.4 + 1.35 * star);
         let years_appeal = (years as f64 - 2.0) * 0.03;
         money_appeal + contention + years_appeal + taste
     }
@@ -2248,23 +2249,31 @@ impl League {
 
         let mut offers: Vec<(PlayerId, FaOffer)> = fa.offers.clone();
 
-        // CPU offers: each team chases the best couple of affordable FAs.
+        let league_avg = strength.values().sum::<f64>() / strength.len().max(1) as f64;
+
+        // CPU offers: each team chases its top affordable FAs. Contenders bid
+        // aggressively (above market) on stars, so the user faces real
+        // competition for big names instead of walking in as the lone suitor.
         let years_for = |a: u8| if a <= 27 { 4 } else if a <= 31 { 3 } else { 2 };
         for t in &self.teams {
             if t.id == user || room[&t.id] <= 0 {
                 continue;
             }
+            let contender = strength[&t.id] > league_avg;
             let mut sp = space[&t.id];
             let mut made = 0;
             for &pid in &pool_sorted {
-                if made >= 2 {
+                if made >= 3 {
                     break;
                 }
-                let mkt = market_salary(*ovr.get(&pid).unwrap_or(&50)) as i64;
+                let p_ovr = *ovr.get(&pid).unwrap_or(&50);
+                let mkt = market_salary(p_ovr) as i64;
+                // A contender stretches for a star; everyone else offers market.
+                let bid = if contender && p_ovr >= 78 { (mkt as f64 * 1.15).round() as i64 } else { mkt };
                 let already = offers.iter().any(|(p, o)| *p == pid && o.team == t.id);
-                if !already && mkt <= sp {
-                    offers.push((pid, FaOffer { team: t.id, salary: mkt as u32, years: years_for(*age.get(&pid).unwrap_or(&25)) }));
-                    sp -= mkt;
+                if !already && bid <= sp {
+                    offers.push((pid, FaOffer { team: t.id, salary: bid as u32, years: years_for(*age.get(&pid).unwrap_or(&25)) }));
+                    sp -= bid;
                     made += 1;
                 }
             }
@@ -2273,7 +2282,6 @@ impl League {
         // Resolve: best FAs first pick the most appealing valid offer. Appeal is
         // preference-based (money has diminishing returns; stars chase winning),
         // so the richest bid doesn't automatically win — especially for stars.
-        let league_avg = strength.values().sum::<f64>() / strength.len().max(1) as f64;
         let mut rng = StdRng::seed_from_u64(self.seed ^ 0xFADE_u64 ^ round as u64);
         let mut signings: Vec<(PlayerId, FaOffer)> = Vec::new();
         for &pid in &pool_sorted {
@@ -2297,12 +2305,12 @@ impl League {
                 }
             }
             if let Some(o) = best {
-                // Stars may hold out early for a better fit rather than sign the
-                // first decent offer — signing them takes patience.
-                let holds_out = round <= 2 && star > 0.5 && rng.gen::<f64>() < 0.30 * star;
-                // A merely tolerable offer might not get signed yet either.
-                let too_cool = best_u < 0.7 && rng.gen::<f64>() < 0.5;
-                if holds_out || too_cool {
+                // Even the best offer isn't a lock: players sign with a
+                // probability that rises with the offer's appeal and falls for
+                // stars (who are pickier and take meetings). So landing a big
+                // name takes a genuinely appealing situation and some patience.
+                let p_sign = (((best_u - 0.5) * 1.6).clamp(0.05, 0.97)) * (1.0 - 0.20 * star);
+                if rng.gen::<f64>() > p_sign {
                     continue;
                 }
                 *room.get_mut(&o.team).unwrap() -= 1;

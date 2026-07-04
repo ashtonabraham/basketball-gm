@@ -571,8 +571,8 @@ body {
 .fin-pl { margin-top: .5rem; }
 .fin-pl td { padding: .4rem .5rem; }
 .fin-pl .fin-sum td { font-weight: 800; border-top: 1px solid var(--border); }
-.fin-pl .fin-sum.rev td { color: #2faa55; }
-.fin-pl .fin-sum.exp td { color: #e0413a; }
+.fin-pl td.num-rev { color: #2faa55; }
+.fin-pl td.num-exp { color: #e0413a; }
 .fin-profit td { font-weight: 900; font-size: 1.02rem; border-top: 2px solid var(--border); color: var(--text); }
 .fin-profit .pl-num.good { color: #2faa55; }
 .fin-profit .pl-num.bad { color: #e0413a; }

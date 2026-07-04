@@ -1,6 +1,6 @@
 //! Shared app state, theme, and browser persistence.
 
-use engine::{League, PlayEvent, PlayerId};
+use engine::{League, PlayEvent, PlayerId, TeamId};
 use leptos::prelude::*;
 
 const SAVE_KEY: &str = "hardwood_gm_save";
@@ -31,6 +31,8 @@ pub struct AppState {
     pub watch_events: StoredValue<Vec<PlayEvent>>,
     /// Id of the player whose detail modal is open, if any.
     pub viewing: RwSignal<Option<PlayerId>>,
+    /// Id of the team whose roster modal is open, if any.
+    pub viewing_team: RwSignal<Option<TeamId>>,
 }
 
 impl AppState {

@@ -241,6 +241,72 @@ fn TopBar() -> impl IntoView {
 
 // ---------- Panels ----------
 
+/// Roster modal for any team in the league (opened from the standings).
+#[component]
+pub fn TeamModal() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let league = state.league;
+    let viewing_team = state.viewing_team;
+    let close = move |_| viewing_team.set(None);
+
+    let data = move || league.with(|l| {
+        let tid = viewing_team.get()?;
+        let t = l.teams.iter().find(|t| t.id == tid)?;
+        let mut roster: Vec<(u32, String, &'static str, u8, u8, u8, String, u8)> = t.roster.iter()
+            .filter_map(|pid| l.players.iter().find(|p| p.id == *pid))
+            .map(|p| (p.id, p.name.clone(), p.position.abbrev(), p.age, p.overall(), p.potential, p.contract.salary_str(), p.contract.years))
+            .collect();
+        roster.sort_by(|a, b| b.4.cmp(&a.4));
+        let payroll = l.team_payroll(tid) as f64 / 1000.0;
+        let space = l.team_cap_space(tid) as f64 / 1000.0;
+        let conf = match t.conference { Conference::East => "Eastern", Conference::West => "Western" };
+        Some((t.full_name(), conf, t.wins, t.losses, t.primary.hex().to_string(), t.secondary.hex().to_string(), payroll, space, roster))
+    });
+
+    view! {
+        <Show when=move || viewing_team.get().is_some()>
+            {move || match data() {
+                None => view! { <div></div> }.into_any(),
+                Some((name, conf, w, l, c1, c2, payroll, space, roster)) => view! {
+                    <div class="modal-backdrop" on:click=close>
+                        <div class="modal-card player-modal" on:click=|e| e.stop_propagation()>
+                            <button class="modal-close" title="Close" on:click=close>"\u{2715}"</button>
+                            <div class="pm-head">
+                                <div class="pm-ovr" style=format!("background:linear-gradient(135deg,{},{})", c1, c2)></div>
+                                <div class="pm-id">
+                                    <h2 class="pm-name">{name}</h2>
+                                    <div class="pm-meta">{conf}" Conference \u{2022} "{w}"\u{2013}"{l}</div>
+                                    <div class="pm-sub">
+                                        <span>"Payroll "<b>{format!("${:.1}M", payroll)}</b></span>
+                                        <span class=if space < 0.0 { "cap-over" } else { "cap-room" }>
+                                            {format!("{} ${:.1}M", if space < 0.0 { "Over by" } else { "Room:" }, space.abs())}
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+                            <table class="tbl" style="margin-top:1rem">
+                                <thead><tr>
+                                    <th class="left">"Player"</th><th>"Pos"</th><th>"Age"</th><th>"OVR"</th><th>"POT"</th><th>"Salary"</th><th>"Yrs"</th>
+                                </tr></thead>
+                                <tbody>
+                                    {roster.into_iter().map(|(id, pname, pos, age, ovr, pot, sal, yrs)| view! {
+                                        <tr class="row">
+                                            <td class="left"><crate::ui::PlayerLink id=id name=pname/></td>
+                                            <td>{pos}</td><td>{age}</td>
+                                            <td><span class="ovr">{ovr}</span></td><td>{pot}</td>
+                                            <td>{sal}</td><td>{yrs}</td>
+                                        </tr>
+                                    }).collect_view()}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                }.into_any(),
+            }}
+        </Show>
+    }
+}
+
 #[component]
 fn StandingsPanel() -> impl IntoView {
     view! {
@@ -261,11 +327,12 @@ fn ConferenceTable(conf: Conference, title: &'static str) -> impl IntoView {
                 .into_iter()
                 .map(|r| {
                     let t = l.teams.iter().find(|t| t.id == r.team_id).unwrap();
-                    (r.seed, t.full_name(), t.abbrev.clone(), r.wins, r.losses, r.win_pct, Some(r.team_id) == user)
+                    (r.team_id, r.seed, t.full_name(), t.abbrev.clone(), r.wins, r.losses, r.win_pct, Some(r.team_id) == user)
                 })
                 .collect::<Vec<_>>()
         })
     };
+    let view_team = move |tid: u32| state.viewing_team.set(Some(tid));
 
     view! {
         <div class="card">
@@ -275,12 +342,12 @@ fn ConferenceTable(conf: Conference, title: &'static str) -> impl IntoView {
                     <tr><th>"#"</th><th class="left">"Team"</th><th>"W"</th><th>"L"</th><th>"PCT"</th></tr>
                 </thead>
                 <tbody>
-                    {move || rows().into_iter().map(|(seed, name, _ab, w, l, pct, is_user)| {
+                    {move || rows().into_iter().map(move |(tid, seed, name, _ab, w, l, pct, is_user)| {
                         let cls = if is_user { "row user" } else if seed <= 8 { "row playoff" } else { "row" };
                         view! {
                             <tr class=cls>
                                 <td>{seed}</td>
-                                <td class="left">{name}</td>
+                                <td class="left"><span class="plink" on:click=move |_| view_team(tid)>{name}</span></td>
                                 <td>{w}</td>
                                 <td>{l}</td>
                                 <td>{fmt_pct(pct)}</td>
@@ -1039,14 +1106,14 @@ fn FinancesPanel() -> impl IntoView {
                             </div>
                             <table class="tbl fin-pl">
                                 <tbody>
-                                    <tr class="row"><td class="left">"Gate receipts"</td><td>{m(p.ticket_rev)}</td></tr>
-                                    <tr class="row"><td class="left">"Concessions"</td><td>{m(p.concession_rev)}</td></tr>
-                                    <tr class="row"><td class="left">"Merchandise"</td><td>{m(p.merch_rev)}</td></tr>
-                                    <tr class="row"><td class="left">"TV & sponsorship"</td><td>{m(p.tv_rev)}</td></tr>
-                                    <tr class="row fin-sum rev"><td class="left">"Revenue"</td><td>{m(p.revenue)}</td></tr>
-                                    <tr class="row"><td class="left">"Payroll"</td><td>{m(p.payroll)}</td></tr>
-                                    <tr class="row"><td class="left">"Departments"</td><td>{m(p.budgets)}</td></tr>
-                                    <tr class="row fin-sum exp"><td class="left">"Expenses"</td><td>{m(p.expenses)}</td></tr>
+                                    <tr class="row"><td class="left">"Gate receipts"</td><td class="num-rev">{m(p.ticket_rev)}</td></tr>
+                                    <tr class="row"><td class="left">"Concessions"</td><td class="num-rev">{m(p.concession_rev)}</td></tr>
+                                    <tr class="row"><td class="left">"Merchandise"</td><td class="num-rev">{m(p.merch_rev)}</td></tr>
+                                    <tr class="row"><td class="left">"TV & sponsorship"</td><td class="num-rev">{m(p.tv_rev)}</td></tr>
+                                    <tr class="row fin-sum"><td class="left">"Revenue"</td><td class="num-rev">{m(p.revenue)}</td></tr>
+                                    <tr class="row"><td class="left">"Payroll"</td><td class="num-exp">{m(p.payroll)}</td></tr>
+                                    <tr class="row"><td class="left">"Departments"</td><td class="num-exp">{m(p.budgets)}</td></tr>
+                                    <tr class="row fin-sum"><td class="left">"Expenses"</td><td class="num-exp">{m(p.expenses)}</td></tr>
                                     <tr class="row"><td class="left">"Owner budget"</td><td>{m(p.budget)}</td></tr>
                                     <tr class="row fin-profit">
                                         <td class="left">"Projected profit"</td>

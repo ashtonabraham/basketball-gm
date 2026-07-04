@@ -18,7 +18,7 @@ pub fn TeamBuilder() -> impl IntoView {
         <div class="builder">
             <header class="builder-top">
                 <div>
-                    <h1 class="brand">"Hardwood " <span class="brand-accent">"GM"</span></h1>
+                    <h1 class="brand">"The " <span class="brand-accent">"League"</span></h1>
                     <p class="subtitle">"Choose your franchise. Location is fixed — make the name and colors yours."</p>
                 </div>
                 <ThemeToggle/>
