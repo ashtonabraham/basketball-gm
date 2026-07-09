@@ -630,3 +630,25 @@ body {
   border: 1px solid var(--border); border-radius: 999px; padding: .12rem .5rem;
   pointer-events: none; backdrop-filter: blur(3px);
 }
+
+/* ---- Owner goals ---- */
+.goal-popup { max-width: 460px; }
+.goal-icon { font-size: 2.6rem; line-height: 1; }
+.goal-from { color: var(--muted); text-transform: uppercase; letter-spacing: .06em; font-size: .7rem; font-weight: 800; margin-top: .4rem; }
+.goal-desc { margin: .5rem 0 .35rem; font-size: 1.35rem; }
+.goal-reward { color: var(--text); font-size: .9rem; margin-bottom: .3rem; }
+.goal-reward b { color: var(--accent); }
+.goal-actions { display: flex; gap: .6rem; justify-content: center; margin-top: 1rem; }
+.goal-actions .btn.big { margin-top: 0; }
+.goal-note { color: var(--muted); font-size: .75rem; margin: .75rem 0 0; }
+
+.goal-list { display: flex; flex-direction: column; gap: .5rem; }
+.goal-row { display: flex; align-items: center; gap: .7rem; padding: .55rem .7rem; background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; }
+.goal-tag { flex: 0 0 auto; font-size: .62rem; font-weight: 800; letter-spacing: .04em; padding: .2rem .45rem; border-radius: 999px; }
+.goal-tag.main { background: var(--accent); color: #fff; }
+.goal-tag.side { background: color-mix(in srgb, var(--muted) 25%, transparent); color: var(--text); }
+.goal-row-desc { flex: 1; font-weight: 600; font-size: .9rem; }
+.goal-row-prog { color: var(--muted); font-size: .82rem; font-variant-numeric: tabular-nums; }
+.goal-row-status { font-weight: 800; font-size: .82rem; }
+.goal-row-status.ok { color: #2faa55; }
+.goal-row-status.bad { color: #e0413a; }

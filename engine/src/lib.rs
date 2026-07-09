@@ -20,9 +20,9 @@ pub mod types;
 pub use draft::{grade_for, Draft, DraftPick, ScoutEntry};
 pub use free_agency::{FaOffer, FreeAgency};
 pub use league::{
-    market_salary, Awards, FinanceProjection, Interest, League, OwnedPick, OwnerMessage, OwnerTone,
-    Phase, PlayoffOutcome, SeasonHistory, SeasonRecap, TradeEval, TradePackage, TradeSuggestion,
-    MIN_SALARY, SALARY_CAP,
+    market_salary, Awards, FinanceProjection, GoalKind, GoalReward, GoalStatus, Interest, League,
+    OwnedPick, OwnerGoal, OwnerMessage, OwnerTone, Phase, PlayoffOutcome, SeasonHistory,
+    SeasonRecap, TradeEval, TradePackage, TradeSuggestion, MIN_SALARY, SALARY_CAP,
 };
 pub use player::{Career, CareerSeason, Contract, Honor, HonorEntry, Player, PlayerTrait, Ratings, SeasonStats};
 pub use playoffs::{Playoffs, Series, ROUND_NAMES};
@@ -130,6 +130,32 @@ mod integration_tests {
                 assert!((4..=7).contains(&s.games_played()));
             }
         }
+    }
+
+    #[test]
+    fn owner_goals_offer_and_resolve() {
+        let mut league = League::new(77);
+        league.select_team(0);
+        // A mandatory season goal is offered right away.
+        let g = league.pending_goal().expect("a season goal is offered");
+        assert!(g.mandatory, "the main goal is mandatory");
+        let id = g.id;
+        league.respond_to_goal(id, true);
+        assert!(league.owner_goals.iter().find(|g| g.id == id).unwrap().status == GoalStatus::Active);
+
+        // Play a full season; goals settle at finish_season and trust stays valid.
+        league.sim_to_end_of_season();
+        league.start_playoffs();
+        league.playoff_sim_all();
+        league.finish_season();
+        assert!(
+            league.owner_goals.iter().filter(|g| g.season == 1).all(|g| matches!(
+                g.status,
+                GoalStatus::Completed | GoalStatus::Failed | GoalStatus::Declined
+            )),
+            "every season-1 goal should be resolved"
+        );
+        assert!((0.0..=1.0).contains(&league.owner_trust));
     }
 
     #[test]

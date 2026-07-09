@@ -25,6 +25,7 @@ pub fn Dashboard() -> impl IntoView {
                         Tab::Stats => view! { <StatsPanel/> }.into_any(),
                         Tab::Trades => view! { <TradesPanel/> }.into_any(),
                         Tab::Finances => view! { <FinancesPanel/> }.into_any(),
+                        Tab::Owner => view! { <OwnerPanel/> }.into_any(),
                         Tab::Playoffs => view! { <PlayoffsPanel/> }.into_any(),
                         Tab::History => view! { <HistoryPanel/> }.into_any(),
                     }}
@@ -143,6 +144,7 @@ fn Sidebar() -> impl IntoView {
                 {nav_btn(Tab::Stats, "Stats")}
                 {nav_btn(Tab::Trades, "Trades")}
                 {nav_btn(Tab::Finances, "Finances")}
+                {nav_btn(Tab::Owner, "Owner")}
                 {nav_btn(Tab::Playoffs, "Playoffs")}
                 {nav_btn(Tab::History, "History")}
             </nav>
@@ -1273,6 +1275,143 @@ fn fin_slider(
                 on:input=move |e| write((event_target_value(&e).parse::<f64>().unwrap_or(0.0) * 1000.0) as u32)
                 on:change=move |_| persist()/>
         </div>
+    }
+}
+
+fn goal_status_label(s: engine::GoalStatus) -> &'static str {
+    match s {
+        engine::GoalStatus::Completed => "\u{2713} Completed",
+        engine::GoalStatus::Failed => "\u{2717} Failed",
+        engine::GoalStatus::Declined => "\u{2014} Declined",
+        _ => "",
+    }
+}
+
+/// The Owner tab: trust/job-security meter, this season's goals + progress, and
+/// a log of resolved goals.
+#[component]
+fn OwnerPanel() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let league = state.league;
+
+    let trust = move || league.with(|l| l.owner_trust);
+    let security = move || league.with(|l| l.job_security().to_string());
+    let warned = move || league.with(|l| l.owner_warning);
+    let active = move || league.with(|l| l.active_goals().into_iter().map(|g| (g.description(), l.goal_progress(g), g.mandatory)).collect::<Vec<_>>());
+    let resolved = move || league.with(|l| l.resolved_goals().into_iter().map(|g| (g.description(), goal_status_label(g.status), g.mandatory, matches!(g.status, engine::GoalStatus::Completed))).collect::<Vec<_>>());
+
+    view! {
+        <div class="card" style="margin-bottom:1.25rem">
+            <h3 class="card-title">"Owner Trust"</h3>
+            {move || { let t = trust(); let pct = (t * 100.0).round(); view! {
+                <div class="fin-att-top">
+                    <span>"Job security: "<b>{security()}</b></span>
+                    <span class="dim">{format!("{pct:.0}%")}</span>
+                </div>
+                <div class="fin-bar" style="height:12px">
+                    <span class={if t >= 0.45 { "fin-fill" } else if t >= 0.25 { "morale-fill mid" } else { "morale-fill lo" }}
+                        style=format!("width:{}%", pct)></span>
+                </div>
+            }}}
+            <Show when=warned>
+                <p class="fin-warn">"\u{26a0} The owner has you on the hot seat. Another poor, low-trust season and he'll make a change."</p>
+            </Show>
+            <p class="hint">"Complete the owner's goals to earn trust (and a bigger budget); decline or fail them and it erodes."</p>
+        </div>
+
+        <div class="card" style="margin-bottom:1.25rem">
+            <h3 class="card-title">"This Season's Goals"</h3>
+            {move || {
+                let a = active();
+                if a.is_empty() {
+                    view! { <p class="empty">"No active goals right now."</p> }.into_any()
+                } else {
+                    view! {
+                        <div class="goal-list">
+                            {a.into_iter().map(|(desc, prog, is_main)| view! {
+                                <div class="goal-row">
+                                    <span class=if is_main { "goal-tag main" } else { "goal-tag side" }>{if is_main { "MAIN" } else { "SIDE" }}</span>
+                                    <span class="goal-row-desc">{desc}</span>
+                                    <span class="goal-row-prog">{prog}</span>
+                                </div>
+                            }).collect_view()}
+                        </div>
+                    }.into_any()
+                }
+            }}
+        </div>
+
+        <Show when=move || !resolved().is_empty()>
+            <div class="card">
+                <h3 class="card-title">"Resolved This Season"</h3>
+                <div class="goal-list">
+                    {move || resolved().into_iter().map(|(desc, status, is_main, ok)| view! {
+                        <div class="goal-row">
+                            <span class=if is_main { "goal-tag main" } else { "goal-tag side" }>{if is_main { "MAIN" } else { "SIDE" }}</span>
+                            <span class="goal-row-desc">{desc}</span>
+                            <span class=if ok { "goal-row-status ok" } else { "goal-row-status bad" }>{status}</span>
+                        </div>
+                    }).collect_view()}
+                </div>
+            </div>
+        </Show>
+    }
+}
+
+/// Pop-up when the owner offers a goal — mandatory ones announce (Accept only);
+/// side quests can be accepted or declined.
+#[component]
+pub fn GoalPopup() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let goal = move || state.league.with(|l| l.pending_goal().map(|g| (g.id, g.description(), g.reward_desc(), g.mandatory)));
+    let accept = move |id: u32| state.update_league(move |l| l.respond_to_goal(id, true));
+    let decline = move |id: u32| state.update_league(move |l| l.respond_to_goal(id, false));
+
+    view! {
+        <Show when=move || goal().is_some()>
+            {move || goal().map(|(id, desc, reward, mandatory)| view! {
+                <div class="overlay">
+                    <div class="champ-popup goal-popup">
+                        <div class="goal-icon">{if mandatory { "\u{1f3af}" } else { "\u{1f4dc}" }}</div>
+                        <div class="goal-from">{if mandatory { "The owner's mandate for the season" } else { "The owner has a challenge for you" }}</div>
+                        <h2 class="goal-desc">{desc}</h2>
+                        <div class="goal-reward">"Reward: "<b>{reward}</b></div>
+                        <div class="goal-actions">
+                            {(!mandatory).then(|| view! { <button class="btn" on:click=move |_| decline(id)>"Decline"</button> })}
+                            <button class="btn btn-primary big" on:click=move |_| accept(id)>
+                                {if mandatory { "Let's do it" } else { "Accept" }}
+                            </button>
+                        </div>
+                        {(!mandatory).then(|| view! { <p class="goal-note">"Declining costs the owner's trust."</p> })}
+                    </div>
+                </div>
+            })}
+        </Show>
+    }
+}
+
+/// Game-over screen when the GM is fired: start a fresh career.
+#[component]
+pub fn FiredOverlay() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let fired = move || state.league.with(|l| l.fired);
+    let restart = move |_| {
+        crate::state::clear_save();
+        state.update_league(|l| *l = engine::League::new(crate::app::time_seed()));
+        state.tab.set(Tab::Standings);
+    };
+    view! {
+        <Show when=fired>
+            <div class="overlay">
+                <div class="champ-popup">
+                    <div class="trophy">"\u{1f4c4}"</div>
+                    <h2 class="champ-name">"You've been let go"</h2>
+                    <div class="champ-sub">"the owner has run out of patience"</div>
+                    <p class="recap-line" style="margin-top:1rem">"Trust in the front office bottomed out. Time for a fresh start somewhere new."</p>
+                    <button class="btn btn-primary big" on:click=restart>"Start a New Career"</button>
+                </div>
+            </div>
+        </Show>
     }
 }
 

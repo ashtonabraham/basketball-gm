@@ -192,6 +192,79 @@ pub struct OwnerMessage {
     pub body: String,
 }
 
+/// A challenge the owner sets — accept it for a shot at a reward (and trust),
+/// decline it and take a trust hit, or accept and fall short for a bigger one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GoalKind {
+    // --- Season-long (the mandatory main goal) ---
+    /// Win at least N games this season.
+    WinGames(u32),
+    /// Put together an N-game win streak this season.
+    WinStreak(u32),
+    /// Turn a season profit of at least N (thousands).
+    Profit(i64),
+    /// Reach the playoffs.
+    MakePlayoffs,
+    // --- Side quests (windowed, measured from acceptance) ---
+    /// Win your next N games in a row (a loss fails it).
+    WinNext(u32),
+    /// Win at least X of your next Y games.
+    WinOfNext(u32, u32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GoalStatus {
+    /// Awaiting the GM's accept/decline.
+    Offered,
+    /// Accepted and in progress.
+    Active,
+    Completed,
+    Failed,
+    Declined,
+}
+
+/// The carrot for completing a goal (beyond the owner's trust).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GoalReward {
+    /// Extra scouting points at the next draft.
+    ScoutPoints(u32),
+}
+
+/// An owner goal instance. The season's mandatory goal has `mandatory = true`
+/// (announced, can't be declined); side quests are optional accept/decline
+/// challenges whose window is measured from the games played at acceptance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnerGoal {
+    pub id: u32,
+    pub season: u32,
+    pub kind: GoalKind,
+    pub reward: GoalReward,
+    pub status: GoalStatus,
+    #[serde(default)]
+    pub mandatory: bool,
+    /// User games played when this was accepted (for windowed side quests).
+    #[serde(default)]
+    pub anchor_games: u32,
+}
+
+impl OwnerGoal {
+    pub fn description(&self) -> String {
+        match self.kind {
+            GoalKind::WinGames(n) => format!("Win at least {n} games this season"),
+            GoalKind::WinStreak(n) => format!("Put together a {n}-game win streak"),
+            GoalKind::Profit(n) => format!("Turn a profit of at least ${:.0}M this season", n as f64 / 1000.0),
+            GoalKind::MakePlayoffs => "Make the playoffs".to_string(),
+            GoalKind::WinNext(n) => format!("Win your next {n} games"),
+            GoalKind::WinOfNext(x, y) => format!("Win {x} of your next {y} games"),
+        }
+    }
+    pub fn reward_desc(&self) -> String {
+        match self.reward {
+            GoalReward::ScoutPoints(n) => format!("+{n} scouting points at the next draft"),
+        }
+    }
+}
+
 /// How interested a free agent is in the user's current offer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Interest {
@@ -387,8 +460,32 @@ pub struct League {
     pub pick_assets: Vec<OwnedPick>,
     #[serde(default)]
     next_pick_id: u32,
+    /// The owner's trust in the GM (0..1), moved by owner goals.
+    #[serde(default = "default_trust")]
+    pub owner_trust: f64,
+    /// Owner goals offered/accepted this and past seasons.
+    #[serde(default)]
+    pub owner_goals: Vec<OwnerGoal>,
+    /// Extra scouting points earned from goals, applied at the next draft.
+    #[serde(default)]
+    pending_scout_bonus: u32,
+    #[serde(default)]
+    next_goal_id: u32,
+    /// How many side quests have been offered this season (cap ~3).
+    #[serde(default)]
+    side_quests_offered: u32,
+    /// Owner issued a hot-seat warning last season; another bad year fires you.
+    #[serde(default)]
+    pub owner_warning: bool,
+    /// The GM has been fired (trust ran out). The UI shows a game-over screen.
+    #[serde(default)]
+    pub fired: bool,
     seed: u64,
     next_player_id: PlayerId,
+}
+
+fn default_trust() -> f64 {
+    0.5
 }
 
 impl League {
@@ -413,6 +510,13 @@ impl League {
             careers: HashMap::new(),
             pick_assets: Vec::new(),
             next_pick_id: 0,
+            owner_trust: 0.5,
+            owner_goals: Vec::new(),
+            pending_scout_bonus: 0,
+            next_goal_id: 0,
+            side_quests_offered: 0,
+            owner_warning: false,
+            fired: false,
             seed,
             next_player_id: 0,
         };
@@ -471,6 +575,8 @@ impl League {
     pub fn select_team(&mut self, team_id: TeamId) {
         self.user_team_id = Some(team_id);
         self.phase = Phase::RegularSeason;
+        // Kick off the first season with the owner's mandatory goal.
+        self.set_season_goal();
     }
 
     /// Edit the user-facing fields of a team (used by the team builder UI).
@@ -604,6 +710,9 @@ impl League {
     pub fn sim_day(&mut self) -> Option<u32> {
         let day = self.current_day()?;
         self.sim_specific_day(day);
+        // Owner-goal bookkeeping: settle finished goals, then maybe pop a side quest.
+        self.check_goals();
+        self.maybe_offer_side_quest();
         if self.regular_season_complete() {
             self.phase = Phase::RegularSeason; // stays until playoffs are started
         }
@@ -1262,6 +1371,11 @@ impl League {
         // Update every player's morale from how their season went.
         self.update_morale();
 
+        // Settle owner goals (profit/playoffs + any unfinished), then reassess
+        // the GM's job security.
+        self.resolve_season_goals();
+        self.check_firing();
+
         // Awards and the owner's note use this season's data; evaluate before
         // pushing history so the owner can compare to last year.
         self.awards = Some(self.compute_awards());
@@ -1339,6 +1453,267 @@ impl League {
     /// A player's career log, if they have any recorded seasons or honors.
     pub fn career(&self, pid: PlayerId) -> Option<&Career> {
         self.careers.get(&pid)
+    }
+
+    // ---- Owner goals, trust & job security ----
+
+    const TRUST_DECLINE: f64 = 0.06;
+    const TRUST_COMPLETE: f64 = 0.11;
+    const TRUST_FAIL: f64 = 0.09;
+
+    /// Set the season's MANDATORY main goal (announced, can't be declined),
+    /// scaled to the roster so it's a real but fair stretch.
+    fn set_season_goal(&mut self) {
+        let Some(uid) = self.user_team_id else { return };
+        let Some(team) = self.teams.iter().find(|t| t.id == uid) else { return };
+        let league_avg: f64 = self.teams.iter().map(|t| t.strength(&self.players)).sum::<f64>() / self.teams.len() as f64;
+        let my = team.strength(&self.players);
+        let exp_pct = (0.5 + (my - league_avg) * 0.02).clamp(0.20, 0.80);
+        let exp_wins = (exp_pct * 82.0).round() as u32;
+        let market = team.market;
+
+        let mut rng = StdRng::seed_from_u64(self.seed ^ 0x60A1_u64 ^ (self.season as u64).wrapping_mul(1009));
+        let (kind, reward) = match rng.gen_range(0..4) {
+            0 => (GoalKind::WinGames((exp_wins + rng.gen_range(2..=6)).min(74)), GoalReward::ScoutPoints(12)),
+            1 => (GoalKind::WinStreak(rng.gen_range(5..=7)), GoalReward::ScoutPoints(10)),
+            2 => (GoalKind::Profit((30_000.0 + market * 25_000.0).round() as i64), GoalReward::ScoutPoints(10)),
+            _ => (GoalKind::MakePlayoffs, GoalReward::ScoutPoints(14)),
+        };
+        let id = self.next_goal_id;
+        self.next_goal_id += 1;
+        self.owner_goals.push(OwnerGoal { id, season: self.season, kind, reward, status: GoalStatus::Offered, mandatory: true, anchor_games: 0 });
+    }
+
+    /// Partway through the season, offer an optional "side quest" (accept/decline).
+    /// Spread across the year, up to three, one pending at a time.
+    fn maybe_offer_side_quest(&mut self) {
+        if self.user_team_id.is_none() {
+            return;
+        }
+        // Never stack an offer on top of the still-unanswered main goal / a quest.
+        if self.owner_goals.iter().any(|g| g.status == GoalStatus::Offered) {
+            return;
+        }
+        const THRESHOLDS: [u32; 3] = [15, 38, 60];
+        let n = self.side_quests_offered as usize;
+        if n >= THRESHOLDS.len() {
+            return;
+        }
+        let gp = self.user_games_played();
+        if gp < THRESHOLDS[n] {
+            return;
+        }
+        let mut rng = StdRng::seed_from_u64(self.seed ^ 0x51DE_u64 ^ ((self.season as u64) << 8) ^ (gp as u64));
+        let (kind, reward) = match rng.gen_range(0..2) {
+            0 => (GoalKind::WinNext(rng.gen_range(3..=5)), GoalReward::ScoutPoints(rng.gen_range(4..=7))),
+            _ => {
+                let y = rng.gen_range(5..=8);
+                let x = ((y as f64) * 0.6).round().max(3.0) as u32;
+                (GoalKind::WinOfNext(x, y), GoalReward::ScoutPoints(rng.gen_range(4..=7)))
+            }
+        };
+        let id = self.next_goal_id;
+        self.next_goal_id += 1;
+        self.owner_goals.push(OwnerGoal { id, season: self.season, kind, reward, status: GoalStatus::Offered, mandatory: false, anchor_games: 0 });
+        self.side_quests_offered += 1;
+    }
+
+    /// The goal currently awaiting a decision, if any.
+    pub fn pending_goal(&self) -> Option<&OwnerGoal> {
+        self.owner_goals.iter().find(|g| g.status == GoalStatus::Offered)
+    }
+
+    /// Goals accepted and still in play this season.
+    pub fn active_goals(&self) -> Vec<&OwnerGoal> {
+        self.owner_goals.iter().filter(|g| g.status == GoalStatus::Active && g.season == self.season).collect()
+    }
+
+    /// This season's completed/failed/declined goals (for the history list).
+    pub fn resolved_goals(&self) -> Vec<&OwnerGoal> {
+        self.owner_goals.iter().filter(|g| g.season == self.season && matches!(g.status, GoalStatus::Completed | GoalStatus::Failed | GoalStatus::Declined)).collect()
+    }
+
+    /// Accept (or decline, if optional) an offered goal. Mandatory goals are
+    /// always accepted; declining an optional one costs a little owner trust.
+    pub fn respond_to_goal(&mut self, id: u32, accept: bool) {
+        let gp = self.user_games_played();
+        let mut declined = false;
+        if let Some(g) = self.owner_goals.iter_mut().find(|g| g.id == id && g.status == GoalStatus::Offered) {
+            if accept || g.mandatory {
+                g.status = GoalStatus::Active;
+                g.anchor_games = gp; // windowed side quests count from here
+            } else {
+                g.status = GoalStatus::Declined;
+                declined = true;
+            }
+        }
+        if declined {
+            self.owner_trust = (self.owner_trust - Self::TRUST_DECLINE).clamp(0.0, 1.0);
+        }
+    }
+
+    fn user_games_played(&self) -> u32 {
+        self.user_team_id.and_then(|id| self.teams.iter().find(|t| t.id == id)).map(|t| t.games_played()).unwrap_or(0)
+    }
+
+    /// The user team's (wins, losses) among games after the first `anchor` games.
+    fn user_record_since(&self, anchor: u32) -> (u32, u32) {
+        let Some(uid) = self.user_team_id else { return (0, 0) };
+        let mut games: Vec<&Game> = self.schedule.iter().filter(|g| g.is_played() && (g.home == uid || g.away == uid)).collect();
+        games.sort_by_key(|g| g.day);
+        let (mut w, mut l) = (0, 0);
+        for g in games.iter().skip(anchor as usize) {
+            let Some(r) = g.result else { continue };
+            let won = if g.home == uid { r.home_score > r.away_score } else { r.away_score > r.home_score };
+            if won { w += 1 } else { l += 1 }
+        }
+        (w, l)
+    }
+
+    /// The user team's current win streak (trailing consecutive wins).
+    pub fn user_current_streak(&self) -> u32 {
+        let Some(uid) = self.user_team_id else { return 0 };
+        let mut games: Vec<&Game> = self.schedule.iter().filter(|g| g.is_played() && (g.home == uid || g.away == uid)).collect();
+        games.sort_by_key(|g| g.day);
+        let mut streak = 0;
+        for g in games.iter().rev() {
+            let Some(r) = g.result else { break };
+            let won = if g.home == uid { r.home_score > r.away_score } else { r.away_score > r.home_score };
+            if won { streak += 1 } else { break }
+        }
+        streak
+    }
+
+    /// Progress toward an active goal, as a human string (for the UI).
+    pub fn goal_progress(&self, g: &OwnerGoal) -> String {
+        let wins = self.user_team_id.and_then(|id| self.teams.iter().find(|t| t.id == id)).map(|t| t.wins).unwrap_or(0);
+        match g.kind {
+            GoalKind::WinGames(n) => format!("{wins} / {n} wins"),
+            GoalKind::WinStreak(n) => format!("streak {} / {n}", self.user_current_streak()),
+            GoalKind::Profit(n) => format!("target ${:.0}M", n as f64 / 1000.0),
+            GoalKind::MakePlayoffs => "in progress".to_string(),
+            GoalKind::WinNext(n) => { let (w, _) = self.user_record_since(g.anchor_games); format!("{w} / {n} won") }
+            GoalKind::WinOfNext(x, y) => { let (w, l) = self.user_record_since(g.anchor_games); format!("{w} of {} ({x} of {y} needed)", w + l) }
+        }
+    }
+
+    /// Owner's confidence in the GM, as a short label (job security).
+    pub fn job_security(&self) -> &'static str {
+        let t = self.owner_trust;
+        if t >= 0.68 { "Untouchable" }
+        else if t >= 0.45 { "Secure" }
+        else if t >= 0.25 { "Shaky" }
+        else { "Hot seat" }
+    }
+
+    /// Check in-season goals after games are played; complete/fail windowed ones.
+    fn check_goals(&mut self) {
+        let Some(uid) = self.user_team_id else { return };
+        let wins = self.teams.iter().find(|t| t.id == uid).map(|t| t.wins).unwrap_or(0);
+        let streak = self.user_current_streak();
+        let season = self.season;
+        let mut rewards = Vec::new();
+        let mut trust_delta = 0.0;
+        for g in &mut self.owner_goals {
+            if g.status != GoalStatus::Active || g.season != season {
+                continue;
+            }
+            let since = |anchor: u32| -> (u32, u32) {
+                let (mut w, mut l) = (0, 0);
+                let mut games: Vec<&Game> = self.schedule.iter().filter(|gg| gg.is_played() && (gg.home == uid || gg.away == uid)).collect();
+                games.sort_by_key(|gg| gg.day);
+                for gg in games.iter().skip(anchor as usize) {
+                    if let Some(r) = gg.result {
+                        let won = if gg.home == uid { r.home_score > r.away_score } else { r.away_score > r.home_score };
+                        if won { w += 1 } else { l += 1 }
+                    }
+                }
+                (w, l)
+            };
+            match g.kind {
+                GoalKind::WinGames(n) => if wins >= n { g.status = GoalStatus::Completed; rewards.push(g.reward); },
+                GoalKind::WinStreak(n) => if streak >= n { g.status = GoalStatus::Completed; rewards.push(g.reward); },
+                GoalKind::WinNext(n) => {
+                    let (w, l) = since(g.anchor_games);
+                    if l > 0 { g.status = GoalStatus::Failed; trust_delta -= Self::TRUST_FAIL; }
+                    else if w >= n { g.status = GoalStatus::Completed; rewards.push(g.reward); }
+                }
+                GoalKind::WinOfNext(x, y) => {
+                    let (w, l) = since(g.anchor_games);
+                    if w >= x { g.status = GoalStatus::Completed; rewards.push(g.reward); }
+                    else if w + l >= y { g.status = GoalStatus::Failed; trust_delta -= Self::TRUST_FAIL; }
+                }
+                _ => {} // profit / playoffs resolved at season's end
+            }
+        }
+        self.owner_trust = (self.owner_trust + trust_delta).clamp(0.0, 1.0);
+        for r in rewards {
+            self.apply_goal_reward(r);
+        }
+    }
+
+    /// At year's end: auto-activate an unanswered mandatory goal, expire unanswered
+    /// side quests, then settle everything still active.
+    fn resolve_season_goals(&mut self) {
+        let Some(uid) = self.user_team_id else { return };
+        let season = self.season;
+        // Finalize anything still merely offered.
+        for g in self.owner_goals.iter_mut().filter(|g| g.season == season && g.status == GoalStatus::Offered) {
+            g.status = if g.mandatory { GoalStatus::Active } else { GoalStatus::Declined };
+        }
+
+        let wins = self.teams.iter().find(|t| t.id == uid).map(|t| t.wins).unwrap_or(0);
+        let profit = self.teams.iter().find(|t| t.id == uid).map(|t| t.finances.last_profit).unwrap_or(0);
+        let made_po = !matches!(self.outcome_for(uid), PlayoffOutcome::MissedPlayoffs);
+        let streak = self.user_current_streak();
+
+        let mut rewards = Vec::new();
+        let mut trust_delta = 0.0;
+        for g in &mut self.owner_goals {
+            if g.status != GoalStatus::Active || g.season != season {
+                continue;
+            }
+            let done = match g.kind {
+                GoalKind::WinGames(n) => wins >= n,
+                GoalKind::WinStreak(n) => streak >= n,
+                GoalKind::Profit(n) => profit >= n,
+                GoalKind::MakePlayoffs => made_po,
+                GoalKind::WinNext(_) | GoalKind::WinOfNext(..) => false, // window never filled
+            };
+            if done {
+                g.status = GoalStatus::Completed;
+                rewards.push(g.reward);
+            } else {
+                g.status = GoalStatus::Failed;
+                trust_delta -= Self::TRUST_FAIL;
+            }
+        }
+        self.owner_trust = (self.owner_trust + trust_delta).clamp(0.0, 1.0);
+        for r in rewards {
+            self.apply_goal_reward(r);
+        }
+    }
+
+    /// Bank a completed goal's reward (and the trust bump that comes with it).
+    fn apply_goal_reward(&mut self, reward: GoalReward) {
+        self.owner_trust = (self.owner_trust + Self::TRUST_COMPLETE).clamp(0.0, 1.0);
+        match reward {
+            GoalReward::ScoutPoints(n) => self.pending_scout_bonus += n,
+        }
+    }
+
+    /// Reassess job security at season's end. A low-trust year earns a hot-seat
+    /// warning; a second one in a row gets the GM fired. Recovering clears it.
+    fn check_firing(&mut self) {
+        if self.owner_trust < 0.15 {
+            if self.owner_warning {
+                self.fired = true;
+            } else {
+                self.owner_warning = true;
+            }
+        } else if self.owner_trust >= 0.30 {
+            self.owner_warning = false;
+        }
     }
 
     // ---- Morale & the locker room ----
@@ -1493,7 +1868,10 @@ impl League {
             scouting.insert(pid, ScoutEntry { estimate: (pot + noise).clamp(30.0, 99.0), uncertainty });
         }
 
-        self.draft = Some(Draft { picks, prospects, on_clock: 0, scouting, scout_points: 25 });
+        // Base scouting budget plus any bonus earned from owner goals.
+        let scout_points = 25 + self.pending_scout_bonus;
+        self.pending_scout_bonus = 0;
+        self.draft = Some(Draft { picks, prospects, on_clock: 0, scouting, scout_points });
         self.phase = Phase::Draft;
     }
 
@@ -2137,7 +2515,10 @@ impl League {
         let payroll = self.team_payroll(tid);
         let budgets = f.coaching + f.training + f.facilities + f.marketing;
         let expenses = payroll + budgets;
-        let budget = revenue + 15_000 + (t.market * 15_000.0) as u32;
+        // The owner opens (or tightens) the purse based on how much he trusts the
+        // GM — high trust buys real spending freedom, low trust squeezes you.
+        let trust_bonus = if self.user_team_id == Some(tid) { ((self.owner_trust - 0.5) * 40_000.0) as i64 } else { 0 };
+        let budget = (revenue as i64 + 15_000 + (t.market * 15_000.0) as i64 + trust_bonus).max(0) as u32;
         FinanceProjection {
             capacity: cap,
             attendance,
@@ -2573,6 +2954,9 @@ impl League {
         let team_ids: Vec<TeamId> = self.teams.iter().map(|t| t.id).collect();
         let mut rng = StdRng::seed_from_u64(self.seed ^ 0x5C4ED_u64 ^ (self.season as u64));
         self.schedule = generate_schedule(&team_ids, &mut rng);
+        // Fresh owner goal for the new year.
+        self.side_quests_offered = 0;
+        self.set_season_goal();
         self.phase = Phase::RegularSeason;
     }
 
