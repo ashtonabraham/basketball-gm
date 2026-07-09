@@ -621,3 +621,12 @@ body {
 }
 .trade-req-banner .plink { margin-right: .3rem; }
 .trade-req-banner .dim { color: var(--muted); }
+
+/* Build version badge (fixed, top-right) */
+.version-badge {
+  position: fixed; top: 8px; right: 10px; z-index: 90;
+  font-size: .68rem; font-weight: 700; letter-spacing: .03em;
+  color: var(--muted); background: color-mix(in srgb, var(--panel) 80%, transparent);
+  border: 1px solid var(--border); border-radius: 999px; padding: .12rem .5rem;
+  pointer-events: none; backdrop-filter: blur(3px);
+}
