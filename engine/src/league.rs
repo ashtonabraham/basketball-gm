@@ -265,6 +265,42 @@ impl OwnerGoal {
     }
 }
 
+/// A player storyline that pops up during the season. Most are morale/culture
+/// moments with a choice; the rare arrest is the only thing that can sideline a
+/// player for a few games.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlayerEventKind {
+    /// Wants more minutes/touches.
+    WantsRole,
+    /// Wants the club to back a community event.
+    Charity,
+    /// Has been grinding in the gym.
+    GymWork,
+    /// A highlight is going viral.
+    Viral,
+    /// Arrested (rare) — can carry a short suspension.
+    Arrest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EventStatus {
+    Pending,
+    Resolved,
+}
+
+/// An instance of a player event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayerEvent {
+    pub id: u32,
+    pub season: u32,
+    pub player_id: PlayerId,
+    pub kind: PlayerEventKind,
+    pub status: EventStatus,
+    /// A one-line summary of what happened, once resolved (for the news feed).
+    #[serde(default)]
+    pub outcome: String,
+}
+
 /// How interested a free agent is in the user's current offer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Interest {
@@ -474,6 +510,13 @@ pub struct League {
     /// How many side quests have been offered this season (cap ~3).
     #[serde(default)]
     side_quests_offered: u32,
+    /// Player storyline events (pending + resolved this and past seasons).
+    #[serde(default)]
+    pub player_events: Vec<PlayerEvent>,
+    #[serde(default)]
+    next_event_id: u32,
+    #[serde(default)]
+    player_events_offered: u32,
     /// Owner issued a hot-seat warning last season; another bad year fires you.
     #[serde(default)]
     pub owner_warning: bool,
@@ -515,6 +558,9 @@ impl League {
             pending_scout_bonus: 0,
             next_goal_id: 0,
             side_quests_offered: 0,
+            player_events: Vec::new(),
+            next_event_id: 0,
+            player_events_offered: 0,
             owner_warning: false,
             fired: false,
             seed,
@@ -647,7 +693,7 @@ impl League {
         let contract = Contract { salary: salary.clamp(MIN_SALARY, 48_000), years: rng.gen_range(1..=4) };
         Player {
             id, name, age, position: pos, ratings, potential,
-            personality: gen_personality(rng), morale: rng.gen_range(0.45..0.70),
+            personality: gen_personality(rng), morale: rng.gen_range(0.45..0.70), suspended: 0,
             team: Some(team_id), draft_season: None, contract,
         }
     }
@@ -689,6 +735,9 @@ impl League {
             sims.push((i, g));
         }
 
+        // Which teams played today (for ticking down suspensions).
+        let mut played_teams: Vec<TeamId> = Vec::new();
+
         // Apply results: stats, records, and the stored final score.
         for (i, g) in sims {
             accumulate_stats(&mut self.season_stats, &g.home);
@@ -701,7 +750,16 @@ impl League {
             if let Some(t) = self.teams.iter_mut().find(|t| t.id == g.away.team_id) {
                 if home_won { t.losses += 1 } else { t.wins += 1 }
             }
+            played_teams.push(g.home.team_id);
+            played_teams.push(g.away.team_id);
             self.schedule[i].result = Some(res);
+        }
+
+        // Tick suspensions down for players whose team played.
+        for p in self.players.iter_mut().filter(|p| p.suspended > 0) {
+            if p.team.map(|t| played_teams.contains(&t)).unwrap_or(false) {
+                p.suspended -= 1;
+            }
         }
     }
 
@@ -710,9 +768,11 @@ impl League {
     pub fn sim_day(&mut self) -> Option<u32> {
         let day = self.current_day()?;
         self.sim_specific_day(day);
-        // Owner-goal bookkeeping: settle finished goals, then maybe pop a side quest.
+        // Owner-goal bookkeeping: settle finished goals, then maybe pop a side
+        // quest or a player storyline.
         self.check_goals();
         self.maybe_offer_side_quest();
+        self.maybe_offer_player_event();
         if self.regular_season_complete() {
             self.phase = Phase::RegularSeason; // stays until playoffs are started
         }
@@ -778,6 +838,10 @@ impl League {
     /// yet — use the `playoff_sim_*` methods to advance.
     pub fn start_playoffs(&mut self) {
         assert!(self.regular_season_complete(), "regular season not finished");
+        // Suspensions don't carry into the postseason.
+        for p in &mut self.players {
+            p.suspended = 0;
+        }
         let east = playoff_seeds(&self.teams, Conference::East);
         let west = playoff_seeds(&self.teams, Conference::West);
 
@@ -1716,6 +1780,197 @@ impl League {
         }
     }
 
+    // ---- Player events (storylines) ----
+
+    /// Maybe pop a player storyline mid-season. One pending at a time, capped per
+    /// season, and never stacked on a pending owner goal.
+    fn maybe_offer_player_event(&mut self) {
+        let Some(uid) = self.user_team_id else { return };
+        if self.pending_goal().is_some() {
+            return;
+        }
+        if self.player_events.iter().any(|e| e.status == EventStatus::Pending) {
+            return;
+        }
+        if self.player_events_offered >= 5 {
+            return;
+        }
+        let gp = self.user_games_played();
+        if gp < 4 {
+            return;
+        }
+        let mut rng = StdRng::seed_from_u64(self.seed ^ 0xE7E7_u64 ^ ((self.season as u64) << 10) ^ (gp as u64));
+        if rng.gen::<f64>() >= 0.12 {
+            return;
+        }
+        let roster: Vec<PlayerId> = self.teams.iter().find(|t| t.id == uid).map(|t| t.roster.clone()).unwrap_or_default();
+        if roster.is_empty() {
+            return;
+        }
+        let pid = roster[rng.gen_range(0..roster.len())];
+        let kind = match rng.gen_range(0..100) {
+            0..=2 => PlayerEventKind::Arrest, // extremely rare
+            3..=30 => PlayerEventKind::WantsRole,
+            31..=55 => PlayerEventKind::GymWork,
+            56..=80 => PlayerEventKind::Viral,
+            _ => PlayerEventKind::Charity,
+        };
+        let id = self.next_event_id;
+        self.next_event_id += 1;
+        self.player_events.push(PlayerEvent { id, season: self.season, player_id: pid, kind, status: EventStatus::Pending, outcome: String::new() });
+        self.player_events_offered += 1;
+    }
+
+    /// The player event awaiting a decision, if any.
+    pub fn pending_player_event(&self) -> Option<&PlayerEvent> {
+        self.player_events.iter().find(|e| e.status == EventStatus::Pending)
+    }
+
+    /// Presentation for an event: (title, description, option labels).
+    pub fn player_event_view(&self, e: &PlayerEvent) -> (String, String, Vec<String>) {
+        let name = self.players.iter().find(|p| p.id == e.player_id).map(|p| p.name.clone()).unwrap_or_default();
+        let city = self.user_team_id.and_then(|id| self.teams.iter().find(|t| t.id == id)).map(|t| t.location.clone()).unwrap_or_default();
+        match e.kind {
+            PlayerEventKind::WantsRole => (
+                format!("{name} wants a bigger role"),
+                format!("{name} feels he's earned more minutes and touches — and he's said as much to the media."),
+                vec!["Give him the green light".into(), "Tell him to earn it".into()],
+            ),
+            PlayerEventKind::Charity => (
+                format!("{name} wants to give back"),
+                format!("{name} is asking the club to help fund a community event in {city}."),
+                vec!["Fund the event".into(), "Not right now".into()],
+            ),
+            PlayerEventKind::GymWork => (
+                format!("{name} is putting in the work"),
+                format!("{name} has been first into the gym and last to leave all month."),
+                vec!["Give him a public shoutout".into(), "Keep him hungry".into()],
+            ),
+            PlayerEventKind::Viral => (
+                format!("{name} is going viral"),
+                format!("A highlight of {name} is blowing up online."),
+                vec!["Lean into it (marketing push)".into(), "Keep it low-key".into()],
+            ),
+            PlayerEventKind::Arrest => (
+                format!("Trouble: {name} arrested"),
+                format!("{name} was arrested overnight, and the story is everywhere. How do you respond?"),
+                vec!["Suspend him (3 games)".into(), "Stand by him".into()],
+            ),
+        }
+    }
+
+    /// Apply the GM's choice for a pending event.
+    pub fn resolve_player_event(&mut self, id: u32, choice: usize) {
+        let Some(uid) = self.user_team_id else { return };
+        let Some(idx) = self.player_events.iter().position(|e| e.id == id && e.status == EventStatus::Pending) else { return };
+        let (pid, kind) = { let e = &self.player_events[idx]; (e.player_id, e.kind) };
+        let name = self.players.iter().find(|p| p.id == pid).map(|p| p.name.clone()).unwrap_or_default();
+
+        let outcome = match (kind, choice) {
+            (PlayerEventKind::WantsRole, 0) => {
+                self.bump_morale(pid, 0.15);
+                self.bump_one_teammate(uid, pid, -0.07);
+                format!("You promised {name} a bigger role — he's fired up.")
+            }
+            (PlayerEventKind::WantsRole, _) => {
+                self.bump_morale(pid, -0.10);
+                format!("You told {name} to earn it — he wasn't thrilled.")
+            }
+            (PlayerEventKind::Charity, 0) => {
+                self.bump_morale(pid, 0.10);
+                self.bump_fan_interest(0.05);
+                format!("The club backed {name}'s community event — great for the city.")
+            }
+            (PlayerEventKind::Charity, _) => {
+                self.bump_morale(pid, -0.06);
+                format!("You passed on {name}'s community event for now.")
+            }
+            (PlayerEventKind::GymWork, 0) => {
+                self.bump_morale(pid, 0.10);
+                self.bump_fan_interest(0.02);
+                format!("You gave {name} a public shoutout for his work ethic.")
+            }
+            (PlayerEventKind::GymWork, _) => {
+                self.bump_morale(pid, 0.03);
+                self.bump_rating(pid, 1);
+                format!("You kept {name} hungry — and the work is showing on the court.")
+            }
+            (PlayerEventKind::Viral, 0) => {
+                self.bump_morale(pid, 0.05);
+                self.bump_fan_interest(0.06);
+                format!("You leaned into {name}'s viral moment — the fanbase ate it up.")
+            }
+            (PlayerEventKind::Viral, _) => {
+                self.bump_morale(pid, 0.02);
+                format!("You kept {name}'s viral moment low-key.")
+            }
+            (PlayerEventKind::Arrest, 0) => {
+                self.bump_morale(pid, -0.20);
+                self.suspend_player(pid, 3);
+                self.bump_team_morale(uid, pid, 0.03);
+                self.bump_fan_interest(-0.03);
+                self.owner_trust = (self.owner_trust + 0.02).clamp(0.0, 1.0);
+                format!("You suspended {name} 3 games — the owner respects the accountability.")
+            }
+            (PlayerEventKind::Arrest, _) => {
+                self.bump_morale(pid, 0.10);
+                self.bump_team_morale(uid, pid, -0.05);
+                self.bump_fan_interest(-0.08);
+                self.owner_trust = (self.owner_trust - 0.05).clamp(0.0, 1.0);
+                format!("You stood by {name} — a divisive call with the fans.")
+            }
+        };
+        self.player_events[idx].status = EventStatus::Resolved;
+        self.player_events[idx].outcome = outcome;
+    }
+
+    /// Resolved events this season, newest first (for the news feed).
+    pub fn recent_player_events(&self) -> Vec<(String, String)> {
+        self.player_events
+            .iter()
+            .rev()
+            .filter(|e| e.season == self.season && e.status == EventStatus::Resolved)
+            .map(|e| {
+                let name = self.players.iter().find(|p| p.id == e.player_id).map(|p| p.name.clone()).unwrap_or_default();
+                (name, e.outcome.clone())
+            })
+            .collect()
+    }
+
+    fn bump_morale(&mut self, pid: PlayerId, d: f64) {
+        if let Some(p) = self.players.iter_mut().find(|p| p.id == pid) {
+            p.morale = (p.morale + d).clamp(0.05, 1.0);
+        }
+    }
+    fn bump_team_morale(&mut self, team: TeamId, except: PlayerId, d: f64) {
+        for p in self.players.iter_mut().filter(|p| p.team == Some(team) && p.id != except) {
+            p.morale = (p.morale + d).clamp(0.05, 1.0);
+        }
+    }
+    fn bump_one_teammate(&mut self, team: TeamId, except: PlayerId, d: f64) {
+        if let Some(p) = self.players.iter_mut().find(|p| p.team == Some(team) && p.id != except) {
+            p.morale = (p.morale + d).clamp(0.05, 1.0);
+        }
+    }
+    fn bump_fan_interest(&mut self, d: f64) {
+        if let Some(uid) = self.user_team_id {
+            if let Some(t) = self.teams.iter_mut().find(|t| t.id == uid) {
+                t.finances.fan_interest = (t.finances.fan_interest + d).clamp(0.05, 1.0);
+            }
+        }
+    }
+    fn bump_rating(&mut self, pid: PlayerId, d: i32) {
+        let mut rng = StdRng::seed_from_u64(self.seed ^ 0xB005_u64 ^ (pid as u64));
+        if let Some(p) = self.players.iter_mut().find(|p| p.id == pid) {
+            apply_attr_delta(&mut p.ratings, d, &mut rng);
+        }
+    }
+    fn suspend_player(&mut self, pid: PlayerId, games: u32) {
+        if let Some(p) = self.players.iter_mut().find(|p| p.id == pid) {
+            p.suspended = games;
+        }
+    }
+
     // ---- Morale & the locker room ----
 
     /// Drift every rostered player's morale toward what their season earned:
@@ -1826,6 +2081,7 @@ impl League {
                 potential,
                 personality: gen_personality(&mut rng),
                 morale: 0.6,
+                suspended: 0,
                 team: None,
                 draft_season: None,
                 contract: Contract::free_agent(),
@@ -2954,8 +3210,9 @@ impl League {
         let team_ids: Vec<TeamId> = self.teams.iter().map(|t| t.id).collect();
         let mut rng = StdRng::seed_from_u64(self.seed ^ 0x5C4ED_u64 ^ (self.season as u64));
         self.schedule = generate_schedule(&team_ids, &mut rng);
-        // Fresh owner goal for the new year.
+        // Fresh owner goal for the new year; reset the season's event budget.
         self.side_quests_offered = 0;
+        self.player_events_offered = 0;
         self.set_season_goal();
         self.phase = Phase::RegularSeason;
     }

@@ -652,3 +652,9 @@ body {
 .goal-row-status { font-weight: 800; font-size: .82rem; }
 .goal-row-status.ok { color: #2faa55; }
 .goal-row-status.bad { color: #e0413a; }
+
+/* ---- Player events / team news ---- */
+.event-desc { color: var(--text); font-size: .92rem; line-height: 1.45; margin: .4rem 0 .2rem; }
+.news-list { display: flex; flex-direction: column; gap: .4rem; }
+.news-item { padding: .5rem .7rem; background: var(--panel-2); border: 1px solid var(--border); border-radius: 9px; font-size: .86rem; }
+.news-item b { color: var(--accent); }

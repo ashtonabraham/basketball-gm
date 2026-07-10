@@ -9,7 +9,7 @@ use engine::{League, Phase};
 use leptos::prelude::*;
 
 /// Build version, shown in the corner so you can tell the deployed build apart.
-pub const VERSION: &str = "v0.6.0";
+pub const VERSION: &str = "v0.7.0";
 
 /// A seed for new leagues, derived from the page-load timestamp.
 pub fn time_seed() -> u64 {
@@ -67,6 +67,7 @@ pub fn App() -> impl IntoView {
             <crate::dashboard::TeamModal/>
             <crate::player_modal::PlayerModal/>
             <crate::dashboard::GoalPopup/>
+            <crate::dashboard::PlayerEventPopup/>
             <crate::dashboard::FiredOverlay/>
             <div class="version-badge" title="Build version">{VERSION}</div>
         </div>

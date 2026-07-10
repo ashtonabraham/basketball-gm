@@ -80,6 +80,7 @@ struct PView {
     trait_blurb: &'static str,
     morale: f64,
     wants_trade: bool,
+    suspended: u32,
     groups: Vec<Group>,
     stats: Vec<StatRow>,
     honors_badges: Vec<String>,
@@ -212,6 +213,7 @@ pub fn PlayerModal() -> impl IntoView {
                 trait_blurb: p.personality.blurb(),
                 morale: p.morale,
                 wants_trade: p.team.is_some() && p.morale < 0.30,
+                suspended: p.suspended,
                 groups,
                 stats,
                 honors_badges,
@@ -266,6 +268,7 @@ pub fn PlayerModal() -> impl IntoView {
                                         <span class="morale-pct">{format!("{:.0}%", v.morale * 100.0)}</span>
                                     </span>
                                     {v.wants_trade.then(|| view! { <span class="trade-flag">"\u{26a0} Wants a trade"</span> })}
+                                    {(v.suspended > 0).then(|| view! { <span class="trade-flag">{format!("\u{1f6a8} Suspended ({} g)", v.suspended)}</span> })}
                                 </div>
 
                                 <div class="pm-tabs">

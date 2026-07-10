@@ -209,6 +209,9 @@ pub struct Player {
     /// 0..1 morale (happiness). Low morale hurts play and can trigger a trade request.
     #[serde(default = "default_morale")]
     pub morale: f64,
+    /// Games remaining on a suspension (the rare arrest); 0 = available.
+    #[serde(default)]
+    pub suspended: u32,
     /// True peak overall this player can reach (the development ceiling). This
     /// is the exact value shown on rosters; for undrafted prospects it is
     /// hidden behind a scouted letter grade.

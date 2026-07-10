@@ -20,9 +20,10 @@ pub mod types;
 pub use draft::{grade_for, Draft, DraftPick, ScoutEntry};
 pub use free_agency::{FaOffer, FreeAgency};
 pub use league::{
-    market_salary, Awards, FinanceProjection, GoalKind, GoalReward, GoalStatus, Interest, League,
-    OwnedPick, OwnerGoal, OwnerMessage, OwnerTone, Phase, PlayoffOutcome, SeasonHistory,
-    SeasonRecap, TradeEval, TradePackage, TradeSuggestion, MIN_SALARY, SALARY_CAP,
+    market_salary, Awards, EventStatus, FinanceProjection, GoalKind, GoalReward, GoalStatus,
+    Interest, League, OwnedPick, OwnerGoal, OwnerMessage, OwnerTone, Phase, PlayerEvent,
+    PlayerEventKind, PlayoffOutcome, SeasonHistory, SeasonRecap, TradeEval, TradePackage,
+    TradeSuggestion, MIN_SALARY, SALARY_CAP,
 };
 pub use player::{Career, CareerSeason, Contract, Honor, HonorEntry, Player, PlayerTrait, Ratings, SeasonStats};
 pub use playoffs::{Playoffs, Series, ROUND_NAMES};
@@ -130,6 +131,34 @@ mod integration_tests {
                 assert!((4..=7).contains(&s.games_played()));
             }
         }
+    }
+
+    #[test]
+    fn arrest_suspension_benches_a_player() {
+        let mut league = League::new(4);
+        league.select_team(0);
+        let pid = league.teams[0].roster[0];
+        // Directly inject + resolve an arrest with a suspension.
+        league.player_events.push(PlayerEvent {
+            id: 999,
+            season: 1,
+            player_id: pid,
+            kind: PlayerEventKind::Arrest,
+            status: EventStatus::Pending,
+            outcome: String::new(),
+        });
+        league.resolve_player_event(999, 0); // "suspend him"
+        let susp = league.players.iter().find(|p| p.id == pid).unwrap().suspended;
+        assert!(susp > 0, "arrest+suspend should bench the player");
+
+        // Sim a chunk of the season; the suspension ticks down as the team plays.
+        league.sim_days(10);
+        let after = league.players.iter().find(|p| p.id == pid).unwrap().suspended;
+        assert!(after < susp, "suspension should count down over games");
+        // Playoffs clear any lingering suspension.
+        league.sim_to_end_of_season();
+        league.start_playoffs();
+        assert_eq!(league.players.iter().find(|p| p.id == pid).unwrap().suspended, 0);
     }
 
     #[test]

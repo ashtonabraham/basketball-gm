@@ -86,6 +86,7 @@ impl<'a> Rotation<'a> {
             .roster
             .iter()
             .filter_map(|pid| players.iter().find(|p| p.id == *pid))
+            .filter(|p| p.suspended == 0) // suspended players can't suit up
             .collect();
         roster.sort_by(|a, b| b.overall().cmp(&a.overall()));
         roster.truncate(9); // top 9 play

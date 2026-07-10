@@ -479,7 +479,7 @@ fn RosterPanel() -> impl IntoView {
                     (p.id, p.name.clone(), p.position.abbrev(), p.age, p.overall(), p.potential,
                      p.contract.salary_str(), p.contract.years,
                      r.inside(), r.outside(), r.playmaking(), r.defending(), r.athletic(),
-                     p.morale, p.personality.label(), p.morale < 0.30)
+                     p.morale, p.personality.label(), p.morale < 0.30, p.suspended)
                 })
                 .collect();
             ps.sort_by(|a, b| b.4.cmp(&a.4));
@@ -536,7 +536,7 @@ fn RosterPanel() -> impl IntoView {
                     <th title="Playmaking">"PMK"</th><th title="Defense">"DEF"</th><th title="Physical">"ATH"</th>
                 </tr></thead>
                 <tbody>
-                    {move || players().into_iter().map(|(id, name, pos, age, ovr, pot, salary, years, ins, out, plm, def, ath, morale, trait_label, wants)| {
+                    {move || players().into_iter().map(|(id, name, pos, age, ovr, pot, salary, years, ins, out, plm, def, ath, morale, trait_label, wants, susp)| {
                         let mood_cls = if morale >= 0.6 { "morale-fill hi" } else if morale >= 0.35 { "morale-fill mid" } else { "morale-fill lo" };
                         view! {
                             <tr class="row">
@@ -545,7 +545,7 @@ fn RosterPanel() -> impl IntoView {
                                 <td>{age}</td>
                                 <td><span class="ovr">{ovr}</span></td>
                                 <td>{pot}</td>
-                                <td class="trait-cell">{trait_label}{wants.then(|| " \u{26a0}")}</td>
+                                <td class="trait-cell">{trait_label}{wants.then(|| " \u{26a0}")}{(susp > 0).then(|| format!(" \u{1f6a8}{susp}"))}</td>
                                 <td>
                                     <span class="morale-bar sm" title=format!("{:.0}% morale", morale * 100.0)>
                                         <span class=mood_cls style=format!("width:{}%", (morale * 100.0).round())></span>
@@ -1299,6 +1299,7 @@ fn OwnerPanel() -> impl IntoView {
     let warned = move || league.with(|l| l.owner_warning);
     let active = move || league.with(|l| l.active_goals().into_iter().map(|g| (g.description(), l.goal_progress(g), g.mandatory)).collect::<Vec<_>>());
     let resolved = move || league.with(|l| l.resolved_goals().into_iter().map(|g| (g.description(), goal_status_label(g.status), g.mandatory, matches!(g.status, engine::GoalStatus::Completed))).collect::<Vec<_>>());
+    let news = move || league.with(|l| l.recent_player_events());
 
     view! {
         <div class="card" style="margin-bottom:1.25rem">
@@ -1342,7 +1343,7 @@ fn OwnerPanel() -> impl IntoView {
         </div>
 
         <Show when=move || !resolved().is_empty()>
-            <div class="card">
+            <div class="card" style="margin-bottom:1.25rem">
                 <h3 class="card-title">"Resolved This Season"</h3>
                 <div class="goal-list">
                     {move || resolved().into_iter().map(|(desc, status, is_main, ok)| view! {
@@ -1351,6 +1352,17 @@ fn OwnerPanel() -> impl IntoView {
                             <span class="goal-row-desc">{desc}</span>
                             <span class=if ok { "goal-row-status ok" } else { "goal-row-status bad" }>{status}</span>
                         </div>
+                    }).collect_view()}
+                </div>
+            </div>
+        </Show>
+
+        <Show when=move || !news().is_empty()>
+            <div class="card">
+                <h3 class="card-title">"Team News"</h3>
+                <div class="news-list">
+                    {move || news().into_iter().map(|(name, outcome)| view! {
+                        <div class="news-item"><b>{name}</b>": "{outcome}</div>
                     }).collect_view()}
                 </div>
             </div>
@@ -1411,6 +1423,43 @@ pub fn FiredOverlay() -> impl IntoView {
                     <button class="btn btn-primary big" on:click=restart>"Start a New Career"</button>
                 </div>
             </div>
+        </Show>
+    }
+}
+
+/// Pop-up for a player storyline (morale moment, viral clip, the rare arrest).
+#[component]
+pub fn PlayerEventPopup() -> impl IntoView {
+    let state = expect_context::<AppState>();
+    let ev = move || state.league.with(|l| {
+        if l.pending_goal().is_some() {
+            return None; // let owner goals resolve first
+        }
+        l.pending_player_event().map(|e| {
+            let (title, desc, opts) = l.player_event_view(e);
+            (e.id, e.kind == engine::PlayerEventKind::Arrest, title, desc, opts)
+        })
+    });
+    let resolve = move |id: u32, choice: usize| state.update_league(move |l| l.resolve_player_event(id, choice));
+
+    view! {
+        <Show when=move || ev().is_some()>
+            {move || ev().map(|(id, arrest, title, desc, opts)| view! {
+                <div class="overlay">
+                    <div class="champ-popup goal-popup">
+                        <div class="goal-icon">{if arrest { "\u{1f6a8}" } else { "\u{1f4f0}" }}</div>
+                        <div class="goal-from">"Team news"</div>
+                        <h2 class="goal-desc">{title}</h2>
+                        <p class="event-desc">{desc}</p>
+                        <div class="goal-actions">
+                            {opts.into_iter().enumerate().map(|(i, label)| {
+                                let cls = if i == 0 { "btn btn-primary" } else { "btn" };
+                                view! { <button class=cls on:click=move |_| resolve(id, i)>{label}</button> }
+                            }).collect_view()}
+                        </div>
+                    </div>
+                </div>
+            })}
         </Show>
     }
 }
