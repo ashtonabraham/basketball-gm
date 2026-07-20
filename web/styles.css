@@ -658,3 +658,22 @@ body {
 .news-list { display: flex; flex-direction: column; gap: .4rem; }
 .news-item { padding: .5rem .7rem; background: var(--panel-2); border: 1px solid var(--border); border-radius: 9px; font-size: .86rem; }
 .news-item b { color: var(--accent); }
+
+/* ---- Owner trust tiers ---- */
+.trust-fill { display: block; height: 100%; border-radius: 999px; transition: width .2s ease; }
+.trust-fill.red { background: #e0413a; }
+.trust-fill.orange { background: #e07a2f; }
+.trust-fill.yellow { background: #e0c020; }
+.trust-fill.fadedgreen { background: #7fbf6a; }
+.trust-fill.green { background: #2faa55; }
+
+/* ---- Draggable range sliders (custom thumb, reliable across browsers) ---- */
+.fin-range { -webkit-appearance: none; appearance: none; width: 100%; height: 8px; margin-top: .45rem;
+  border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); cursor: pointer; outline: none; }
+.fin-range::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 18px; height: 18px;
+  border-radius: 50%; background: var(--accent); border: 2px solid var(--panel); box-shadow: 0 1px 3px rgba(0,0,0,.3);
+  cursor: grab; }
+.fin-range::-webkit-slider-thumb:active { cursor: grabbing; }
+.fin-range::-moz-range-thumb { width: 18px; height: 18px; border-radius: 50%; background: var(--accent);
+  border: 2px solid var(--panel); box-shadow: 0 1px 3px rgba(0,0,0,.3); cursor: grab; }
+.fin-range::-moz-range-track { height: 8px; border-radius: 999px; background: var(--panel-2); }

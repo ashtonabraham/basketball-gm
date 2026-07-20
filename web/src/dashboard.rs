@@ -1264,16 +1264,34 @@ fn fin_slider(
             commit(f);
         }
     };
+    // Locally-controlled slider position (in $M). Driving the input from a local
+    // signal — rather than reactively from the league — keeps the native drag
+    // gesture from being cancelled mid-slide. We still push every change through
+    // to the engine so the P&L updates live, and sync back if the value changes
+    // externally (e.g. a new season) while we're not dragging.
+    let pos = RwSignal::new(read() as f64 / 1000.0);
+    let dragging = RwSignal::new(false);
+    Effect::new(move |_| {
+        let external = read() as f64 / 1000.0;
+        if !dragging.get_untracked() && (external - pos.get_untracked()).abs() > 0.001 {
+            pos.set(external);
+        }
+    });
     view! {
         <div class="fin-slider">
             <div class="fin-slider-top">
                 <span class="fin-slider-label">{label}<span class="fin-slider-note">{note}</span></span>
-                <span class="fin-slider-val">{move || format!("${:.1}M", read() as f64 / 1000.0)}</span>
+                <span class="fin-slider-val">{move || format!("${:.1}M", pos.get())}</span>
             </div>
             <input class="fin-range" type="range" min="0" max="40" step="0.5"
-                prop:value=move || read() as f64 / 1000.0
-                on:input=move |e| write((event_target_value(&e).parse::<f64>().unwrap_or(0.0) * 1000.0) as u32)
-                on:change=move |_| persist()/>
+                prop:value=move || pos.get()
+                on:pointerdown=move |_| dragging.set(true)
+                on:input=move |e| {
+                    let m: f64 = event_target_value(&e).parse().unwrap_or(0.0);
+                    pos.set(m);
+                    write((m * 1000.0) as u32);
+                }
+                on:change=move |_| { dragging.set(false); persist(); }/>
         </div>
     }
 }
@@ -1304,14 +1322,20 @@ fn OwnerPanel() -> impl IntoView {
     view! {
         <div class="card" style="margin-bottom:1.25rem">
             <h3 class="card-title">"Owner Trust"</h3>
-            {move || { let t = trust(); let pct = (t * 100.0).round(); view! {
+            {move || { let t = trust(); let pct = (t * 100.0).round();
+                // Five tiers: red -> orange -> yellow -> faded green -> true green.
+                let tier = if t < 0.20 { "trust-fill red" }
+                    else if t < 0.35 { "trust-fill orange" }
+                    else if t < 0.50 { "trust-fill yellow" }
+                    else if t < 0.68 { "trust-fill fadedgreen" }
+                    else { "trust-fill green" };
+                view! {
                 <div class="fin-att-top">
                     <span>"Job security: "<b>{security()}</b></span>
                     <span class="dim">{format!("{pct:.0}%")}</span>
                 </div>
                 <div class="fin-bar" style="height:12px">
-                    <span class={if t >= 0.45 { "fin-fill" } else if t >= 0.25 { "morale-fill mid" } else { "morale-fill lo" }}
-                        style=format!("width:{}%", pct)></span>
+                    <span class=tier style=format!("width:{}%", pct)></span>
                 </div>
             }}}
             <Show when=warned>
