@@ -1049,9 +1049,19 @@ fn ResultsBar() -> impl IntoView {
         })
     };
 
+    // Keep the strip pinned to the most recent games (right edge) instead of
+    // snapping back to the season opener each time it re-renders after a sim.
+    let node: NodeRef<leptos::html::Div> = NodeRef::new();
+    Effect::new(move |_| {
+        let _ = games().len(); // re-run whenever a game is added
+        if let Some(el) = node.get() {
+            el.set_scroll_left(el.scroll_width());
+        }
+    });
+
     view! {
         <Show when=move || !games().is_empty()>
-            <div class="results-bar">
+            <div class="results-bar" node_ref=node>
                 {move || games().into_iter().map(|(win, loc, opp, us, them)| {
                     let tip = format!("{} {}\u{2013}{} {} {}", if win { "W" } else { "L" }, us, them, loc, opp);
                     view! {
@@ -1264,17 +1274,23 @@ fn fin_slider(
             commit(f);
         }
     };
-    // Locally-controlled slider position (in $M). Driving the input from a local
-    // signal — rather than reactively from the league — keeps the native drag
-    // gesture from being cancelled mid-slide. We still push every change through
-    // to the engine so the P&L updates live, and sync back if the value changes
-    // externally (e.g. a new season) while we're not dragging.
+    // Fully UNCONTROLLED range input: we never bind `prop:value` reactively
+    // (re-setting a range's value mid-gesture cancels the native drag on WebKit,
+    // which is why it only clicked and wouldn't slide). Instead we set the
+    // initial value once, read new values only from events, and imperatively
+    // push the value back into the element via a NodeRef when the underlying
+    // budget changes externally (e.g. a new season) — but never while dragging.
     let pos = RwSignal::new(read() as f64 / 1000.0);
     let dragging = RwSignal::new(false);
+    let node: NodeRef<leptos::html::Input> = NodeRef::new();
+    let init = read() as f64 / 1000.0;
     Effect::new(move |_| {
         let external = read() as f64 / 1000.0;
-        if !dragging.get_untracked() && (external - pos.get_untracked()).abs() > 0.001 {
-            pos.set(external);
+        if !dragging.get() {
+            if let Some(el) = node.get() {
+                el.set_value(&external.to_string());
+                pos.set(external);
+            }
         }
     });
     view! {
@@ -1284,13 +1300,15 @@ fn fin_slider(
                 <span class="fin-slider-val">{move || format!("${:.1}M", pos.get())}</span>
             </div>
             <input class="fin-range" type="range" min="0" max="40" step="0.5"
-                prop:value=move || pos.get()
+                node_ref=node
+                value=init
                 on:pointerdown=move |_| dragging.set(true)
                 on:input=move |e| {
                     let m: f64 = event_target_value(&e).parse().unwrap_or(0.0);
                     pos.set(m);
                     write((m * 1000.0) as u32);
                 }
+                on:pointerup=move |_| { dragging.set(false); persist(); }
                 on:change=move |_| { dragging.set(false); persist(); }/>
         </div>
     }
@@ -1318,6 +1336,7 @@ fn OwnerPanel() -> impl IntoView {
     let active = move || league.with(|l| l.active_goals().into_iter().map(|g| (g.description(), l.goal_progress(g), g.mandatory)).collect::<Vec<_>>());
     let resolved = move || league.with(|l| l.resolved_goals().into_iter().map(|g| (g.description(), goal_status_label(g.status), g.mandatory, matches!(g.status, engine::GoalStatus::Completed))).collect::<Vec<_>>());
     let news = move || league.with(|l| l.recent_player_events());
+    let remarks = move || league.with(|l| l.recent_owner_remarks());
 
     view! {
         <div class="card" style="margin-bottom:1.25rem">
@@ -1343,6 +1362,17 @@ fn OwnerPanel() -> impl IntoView {
             </Show>
             <p class="hint">"Complete the owner's goals to earn trust (and a bigger budget); decline or fail them and it erodes."</p>
         </div>
+
+        <Show when=move || !remarks().is_empty()>
+            <div class="card" style="margin-bottom:1.25rem">
+                <h3 class="card-title">"From the Owner"</h3>
+                <div class="news-list">
+                    {move || remarks().into_iter().map(|r| view! {
+                        <div class="owner-remark">{r}</div>
+                    }).collect_view()}
+                </div>
+            </div>
+        </Show>
 
         <div class="card" style="margin-bottom:1.25rem">
             <h3 class="card-title">"This Season's Goals"</h3>

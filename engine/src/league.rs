@@ -517,6 +517,9 @@ pub struct League {
     next_event_id: u32,
     #[serde(default)]
     player_events_offered: u32,
+    /// Short notes from the owner this season (goal outcomes, warnings), newest last.
+    #[serde(default)]
+    pub owner_remarks: Vec<String>,
     /// Owner issued a hot-seat warning last season; another bad year fires you.
     #[serde(default)]
     pub owner_warning: bool,
@@ -561,6 +564,7 @@ impl League {
             player_events: Vec::new(),
             next_event_id: 0,
             player_events_offered: 0,
+            owner_remarks: Vec::new(),
             owner_warning: false,
             fired: false,
             seed,
@@ -1597,11 +1601,17 @@ impl League {
         self.owner_goals.iter().filter(|g| g.season == self.season && matches!(g.status, GoalStatus::Completed | GoalStatus::Failed | GoalStatus::Declined)).collect()
     }
 
+    /// Recent owner remarks this season (goal outcomes), newest first.
+    pub fn recent_owner_remarks(&self) -> Vec<String> {
+        self.owner_remarks.iter().rev().cloned().collect()
+    }
+
     /// Accept (or decline, if optional) an offered goal. Mandatory goals are
     /// always accepted; declining an optional one costs a little owner trust.
     pub fn respond_to_goal(&mut self, id: u32, accept: bool) {
         let gp = self.user_games_played();
         let mut declined = false;
+        let mut desc = String::new();
         if let Some(g) = self.owner_goals.iter_mut().find(|g| g.id == id && g.status == GoalStatus::Offered) {
             if accept || g.mandatory {
                 g.status = GoalStatus::Active;
@@ -1609,10 +1619,12 @@ impl League {
             } else {
                 g.status = GoalStatus::Declined;
                 declined = true;
+                desc = g.description().to_lowercase();
             }
         }
         if declined {
             self.owner_trust = (self.owner_trust - Self::TRUST_DECLINE).clamp(0.0, 1.0);
+            self.owner_remarks.push(format!("\"You passed on my challenge to {desc}. I'll remember that.\""));
         }
     }
 
@@ -1677,6 +1689,7 @@ impl League {
         let streak = self.user_current_streak();
         let season = self.season;
         let mut rewards = Vec::new();
+        let mut remarks = Vec::new();
         let mut trust_delta = 0.0;
         for g in &mut self.owner_goals {
             if g.status != GoalStatus::Active || g.season != season {
@@ -1695,24 +1708,35 @@ impl League {
                 (w, l)
             };
             match g.kind {
-                GoalKind::WinGames(n) => if wins >= n { g.status = GoalStatus::Completed; rewards.push(g.reward); },
-                GoalKind::WinStreak(n) => if streak >= n { g.status = GoalStatus::Completed; rewards.push(g.reward); },
+                GoalKind::WinGames(n) => if wins >= n { g.status = GoalStatus::Completed; rewards.push(g.reward); remarks.push(Self::goal_remark(g, true)); },
+                GoalKind::WinStreak(n) => if streak >= n { g.status = GoalStatus::Completed; rewards.push(g.reward); remarks.push(Self::goal_remark(g, true)); },
                 GoalKind::WinNext(n) => {
                     let (w, l) = since(g.anchor_games);
-                    if l > 0 { g.status = GoalStatus::Failed; trust_delta -= Self::TRUST_FAIL; }
-                    else if w >= n { g.status = GoalStatus::Completed; rewards.push(g.reward); }
+                    if l > 0 { g.status = GoalStatus::Failed; trust_delta -= Self::TRUST_FAIL; remarks.push(Self::goal_remark(g, false)); }
+                    else if w >= n { g.status = GoalStatus::Completed; rewards.push(g.reward); remarks.push(Self::goal_remark(g, true)); }
                 }
                 GoalKind::WinOfNext(x, y) => {
                     let (w, l) = since(g.anchor_games);
-                    if w >= x { g.status = GoalStatus::Completed; rewards.push(g.reward); }
-                    else if w + l >= y { g.status = GoalStatus::Failed; trust_delta -= Self::TRUST_FAIL; }
+                    if w >= x { g.status = GoalStatus::Completed; rewards.push(g.reward); remarks.push(Self::goal_remark(g, true)); }
+                    else if w + l >= y { g.status = GoalStatus::Failed; trust_delta -= Self::TRUST_FAIL; remarks.push(Self::goal_remark(g, false)); }
                 }
                 _ => {} // profit / playoffs resolved at season's end
             }
         }
         self.owner_trust = (self.owner_trust + trust_delta).clamp(0.0, 1.0);
+        self.owner_remarks.extend(remarks);
         for r in rewards {
             self.apply_goal_reward(r);
+        }
+    }
+
+    /// A short owner reaction to a goal outcome (for the remarks feed).
+    fn goal_remark(g: &OwnerGoal, completed: bool) -> String {
+        let d = g.description().to_lowercase();
+        if completed {
+            format!("\"Exactly what I asked for — you managed to {d}. Well done.\"")
+        } else {
+            format!("\"I'm disappointed. I asked you to {d}, and it didn't happen.\"")
         }
     }
 
@@ -1732,6 +1756,7 @@ impl League {
         let streak = self.user_current_streak();
 
         let mut rewards = Vec::new();
+        let mut remarks = Vec::new();
         let mut trust_delta = 0.0;
         for g in &mut self.owner_goals {
             if g.status != GoalStatus::Active || g.season != season {
@@ -1747,12 +1772,15 @@ impl League {
             if done {
                 g.status = GoalStatus::Completed;
                 rewards.push(g.reward);
+                remarks.push(Self::goal_remark(g, true));
             } else {
                 g.status = GoalStatus::Failed;
                 trust_delta -= Self::TRUST_FAIL;
+                remarks.push(Self::goal_remark(g, false));
             }
         }
         self.owner_trust = (self.owner_trust + trust_delta).clamp(0.0, 1.0);
+        self.owner_remarks.extend(remarks);
         for r in rewards {
             self.apply_goal_reward(r);
         }
@@ -1843,8 +1871,8 @@ impl League {
             ),
             PlayerEventKind::GymWork => (
                 format!("{name} is putting in the work"),
-                format!("{name} has been first into the gym and last to leave all month."),
-                vec!["Give him a public shoutout".into(), "Keep him hungry".into()],
+                format!("{name} has been first into the gym and last to leave all month. Do you spotlight it, or keep the chip on his shoulder?"),
+                vec!["Praise him publicly (+morale)".into(), "Keep him hungry (+development)".into()],
             ),
             PlayerEventKind::Viral => (
                 format!("{name} is going viral"),
@@ -1886,14 +1914,19 @@ impl League {
                 format!("You passed on {name}'s community event for now.")
             }
             (PlayerEventKind::GymWork, 0) => {
-                self.bump_morale(pid, 0.10);
+                // Recognition: a real, lasting morale lift. Higher morale plays
+                // better (team chemistry in-game), develops faster, and keeps him
+                // from souring into a trade request — plus a little goodwill with fans.
+                self.bump_morale(pid, 0.16);
                 self.bump_fan_interest(0.02);
-                format!("You gave {name} a public shoutout for his work ethic.")
+                format!("You gave {name} a public shoutout — he's beaming, and a happy star lifts the whole locker room.")
             }
             (PlayerEventKind::GymWork, _) => {
-                self.bump_morale(pid, 0.03);
-                self.bump_rating(pid, 1);
-                format!("You kept {name} hungry — and the work is showing on the court.")
+                // Withhold praise, feed the grind: a permanent +2 across his
+                // attributes (a real overall bump), at the cost of a little morale.
+                self.bump_rating(pid, 2);
+                self.bump_morale(pid, -0.06);
+                format!("You kept {name} hungry — no headlines, but the extra work paid off with a real jump in his game.")
             }
             (PlayerEventKind::Viral, 0) => {
                 self.bump_morale(pid, 0.05);
@@ -3213,6 +3246,7 @@ impl League {
         // Fresh owner goal for the new year; reset the season's event budget.
         self.side_quests_offered = 0;
         self.player_events_offered = 0;
+        self.owner_remarks.clear();
         self.set_season_goal();
         self.phase = Phase::RegularSeason;
     }
