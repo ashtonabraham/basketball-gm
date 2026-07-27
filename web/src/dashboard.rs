@@ -149,6 +149,8 @@ fn Sidebar() -> impl IntoView {
                 {nav_btn(Tab::History, "History")}
             </nav>
             <div class="sidebar-foot">
+                <button class="nav-item" title="Save & return to your leagues"
+                    on:click=move |_| state.go_home()>"\u{2190} My Leagues"</button>
                 <ThemeToggle/>
             </div>
         </aside>
@@ -1274,42 +1276,35 @@ fn fin_slider(
             commit(f);
         }
     };
-    // Fully UNCONTROLLED range input: we never bind `prop:value` reactively
-    // (re-setting a range's value mid-gesture cancels the native drag on WebKit,
-    // which is why it only clicked and wouldn't slide). Instead we set the
-    // initial value once, read new values only from events, and imperatively
-    // push the value back into the element via a NodeRef when the underlying
-    // budget changes externally (e.g. a new season) — but never while dragging.
-    let pos = RwSignal::new(read() as f64 / 1000.0);
-    let dragging = RwSignal::new(false);
-    let node: NodeRef<leptos::html::Input> = NodeRef::new();
+    // KEY: writing to the engine on every `on:input` triggers a re-render
+    // (recomputing the P&L + merch over ~1500 players) mid-gesture, which resets
+    // the drag after a single step. So during a drag `on:input` does ONLY cheap
+    // local work (update the label + number field); we commit to the engine once
+    // on release (`on:change`). The range is uncontrolled (initial `value`, no
+    // reactive `prop:value`) so nothing re-sets its position while dragging.
+    let val = RwSignal::new(read() as f64 / 1000.0);
     let init = read() as f64 / 1000.0;
-    Effect::new(move |_| {
-        let external = read() as f64 / 1000.0;
-        if !dragging.get() {
-            if let Some(el) = node.get() {
-                el.set_value(&external.to_string());
-                pos.set(external);
-            }
-        }
-    });
+    let preview = move |m: f64| val.set(m.clamp(0.0, 40.0)); // cheap: label/number only
+    let commit_now = move || {
+        write((val.get_untracked() * 1000.0) as u32);
+        persist();
+    };
     view! {
         <div class="fin-slider">
             <div class="fin-slider-top">
                 <span class="fin-slider-label">{label}<span class="fin-slider-note">{note}</span></span>
-                <span class="fin-slider-val">{move || format!("${:.1}M", pos.get())}</span>
+                <span class="fin-slider-val">{move || format!("${:.1}M", val.get())}</span>
             </div>
-            <input class="fin-range" type="range" min="0" max="40" step="0.5"
-                node_ref=node
-                value=init
-                on:pointerdown=move |_| dragging.set(true)
-                on:input=move |e| {
-                    let m: f64 = event_target_value(&e).parse().unwrap_or(0.0);
-                    pos.set(m);
-                    write((m * 1000.0) as u32);
-                }
-                on:pointerup=move |_| { dragging.set(false); persist(); }
-                on:change=move |_| { dragging.set(false); persist(); }/>
+            <div class="fin-slider-row">
+                <input class="fin-range" type="range" min="0" max="40" step="0.5"
+                    value=init
+                    on:input=move |e| preview(event_target_value(&e).parse().unwrap_or(0.0))
+                    on:change=move |_| commit_now()/>
+                <input class="input fin-num" type="number" min="0" max="40" step="0.5"
+                    prop:value=move || val.get()
+                    on:input=move |e| preview(event_target_value(&e).parse().unwrap_or(0.0))
+                    on:change=move |_| commit_now()/>
+            </div>
         </div>
     }
 }
@@ -1461,10 +1456,13 @@ pub fn GoalPopup() -> impl IntoView {
 pub fn FiredOverlay() -> impl IntoView {
     let state = expect_context::<AppState>();
     let fired = move || state.league.with(|l| l.fired);
+    // Being fired ends that save: delete the slot and return to My Leagues.
     let restart = move |_| {
-        crate::state::clear_save();
-        state.update_league(|l| *l = engine::League::new(crate::app::time_seed()));
-        state.tab.set(Tab::Standings);
+        if let Some(id) = state.current_slot.get_untracked() {
+            crate::state::delete_slot(id);
+        }
+        state.current_slot.set(None);
+        crate::state::set_current(None);
     };
     view! {
         <Show when=fired>
@@ -1474,7 +1472,7 @@ pub fn FiredOverlay() -> impl IntoView {
                     <h2 class="champ-name">"You've been let go"</h2>
                     <div class="champ-sub">"the owner has run out of patience"</div>
                     <p class="recap-line" style="margin-top:1rem">"Trust in the front office bottomed out. Time for a fresh start somewhere new."</p>
-                    <button class="btn btn-primary big" on:click=restart>"Start a New Career"</button>
+                    <button class="btn btn-primary big" on:click=restart>"Back to My Leagues"</button>
                 </div>
             </div>
         </Show>

@@ -1,15 +1,16 @@
-//! Root component: sets up global state, theming, and routes between the
-//! team builder and the main dashboard.
+//! Root component: sets up global state, theming, and routes between the home
+//! (save slots) screen, the team builder, and the main dashboard.
 
 use crate::dashboard::Dashboard;
 use crate::draft::DraftScreen;
-use crate::state::{load_saved_league, load_theme, save_theme, AppState, Tab};
+use crate::home::HomeScreen;
+use crate::state::{load_current, load_slot, load_theme, save_theme, AppState, Tab};
 use crate::team_builder::TeamBuilder;
 use engine::{League, Phase};
 use leptos::prelude::*;
 
 /// Build version, shown in the corner so you can tell the deployed build apart.
-pub const VERSION: &str = "v0.8.0";
+pub const VERSION: &str = "v0.9.0";
 
 /// A seed for new leagues, derived from the page-load timestamp.
 pub fn time_seed() -> u64 {
@@ -23,14 +24,21 @@ pub fn time_seed() -> u64 {
 
 #[component]
 pub fn App() -> impl IntoView {
-    let league = RwSignal::new(load_saved_league().unwrap_or_else(|| League::new(time_seed())));
+    // Resume the last-played slot if there is one; otherwise start on the home
+    // screen with a throwaway league in the signal until a slot is opened.
+    let start_slot = load_current();
+    let start_league = start_slot.and_then(load_slot).unwrap_or_else(|| League::new(time_seed()));
+    let resume = start_slot.filter(|id| load_slot(*id).is_some());
+
+    let league = RwSignal::new(start_league);
     let dark = RwSignal::new(load_theme());
     let tab = RwSignal::new(Tab::Standings);
+    let current_slot = RwSignal::new(resume);
     let watching = RwSignal::new(None::<usize>);
     let watch_events = StoredValue::new(Vec::<engine::PlayEvent>::new());
     let viewing = RwSignal::new(None::<engine::PlayerId>);
     let viewing_team = RwSignal::new(None::<engine::TeamId>);
-    let state = AppState { league, dark, tab, watching, watch_events, viewing, viewing_team };
+    let state = AppState { league, dark, tab, current_slot, watching, watch_events, viewing, viewing_team };
     provide_context(state);
 
     // Persist theme whenever it changes.
@@ -58,11 +66,17 @@ pub fn App() -> impl IntoView {
 
     view! {
         <div class=root_class style=move || format!("--accent:{}", accent())>
-            {move || match phase() {
-                Phase::TeamSelect => view! { <TeamBuilder/> }.into_any(),
-                Phase::Draft => view! { <DraftScreen/> }.into_any(),
-                Phase::FreeAgency => view! { <crate::free_agency::FreeAgencyScreen/> }.into_any(),
-                _ => view! { <Dashboard/> }.into_any(),
+            {move || {
+                // No active slot -> home / save-slots screen.
+                if current_slot.get().is_none() {
+                    return view! { <HomeScreen/> }.into_any();
+                }
+                match phase() {
+                    Phase::TeamSelect => view! { <TeamBuilder/> }.into_any(),
+                    Phase::Draft => view! { <DraftScreen/> }.into_any(),
+                    Phase::FreeAgency => view! { <crate::free_agency::FreeAgencyScreen/> }.into_any(),
+                    _ => view! { <Dashboard/> }.into_any(),
+                }
             }}
             <crate::dashboard::TeamModal/>
             <crate::player_modal::PlayerModal/>
