@@ -212,6 +212,10 @@ pub struct Player {
     /// Games remaining on a suspension (the rare arrest); 0 = available.
     #[serde(default)]
     pub suspended: u32,
+    /// The team this player last played for, remembered when his contract
+    /// expires so free agency can factor in loyalty/morale toward re-signing.
+    #[serde(default)]
+    pub prev_team: Option<TeamId>,
     /// True peak overall this player can reach (the development ceiling). This
     /// is the exact value shown on rosters; for undrafted prospects it is
     /// hidden behind a scouted letter grade.

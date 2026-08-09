@@ -698,6 +698,7 @@ impl League {
         Player {
             id, name, age, position: pos, ratings, potential,
             personality: gen_personality(rng), morale: rng.gen_range(0.45..0.70), suspended: 0,
+            prev_team: None,
             team: Some(team_id), draft_season: None, contract,
         }
     }
@@ -1124,6 +1125,9 @@ impl League {
         for pid in released {
             if let Some(p) = self.players.iter_mut().find(|p| p.id == pid) {
                 let team = p.team.take();
+                // Remember his old team so free agency can weigh loyalty/morale
+                // toward re-signing there.
+                p.prev_team = team;
                 p.contract = Contract::free_agent();
                 if let Some(tid) = team {
                     if let Some(t) = self.teams.iter_mut().find(|t| t.id == tid) {
@@ -2115,6 +2119,7 @@ impl League {
                 personality: gen_personality(&mut rng),
                 morale: 0.6,
                 suspended: 0,
+                prev_team: None,
                 team: None,
                 draft_season: None,
                 contract: Contract::free_agent(),
@@ -2981,7 +2986,8 @@ impl League {
         let star = ((p.overall() as f64 - 70.0) / 25.0).clamp(0.0, 1.0);
         let league_avg = self.teams.iter().map(|t| t.strength(&self.players)).sum::<f64>() / self.teams.len() as f64;
         let user_strength = self.teams.iter().find(|t| t.id == user).map(|t| t.strength(&self.players)).unwrap_or(league_avg);
-        let score = Self::fa_appeal(offer.salary, offer.years, market, star, user_strength, league_avg, self.team_fa_bonus(user));
+        let loyalty = self.resign_loyalty(pid, user);
+        let score = Self::fa_appeal(offer.salary, offer.years, market, star, user_strength, league_avg, self.team_fa_bonus(user), loyalty);
 
         if score >= 1.15 { Interest::Eager }
         else if score >= 0.95 { Interest::Interested }
@@ -2992,16 +2998,30 @@ impl League {
     /// How appealing an offer is to a free agent. Money has diminishing returns
     /// (capped at 1.6× market), and matters less to stars; contention (team
     /// strength vs league average) matters more to stars. `taste` is per-player
-    /// randomness the sim adds so the richest bid isn't automatic.
+    /// randomness the sim adds so the richest bid isn't automatic. `loyalty` is
+    /// the re-signing pull toward his old team (positive if he was happy there,
+    /// negative if he wasn't); it's 0 for any team he didn't just play for.
     #[allow(clippy::too_many_arguments)]
-    fn fa_appeal(salary: u32, years: u8, market: f64, star: f64, team_strength: f64, league_avg: f64, taste: f64) -> f64 {
+    fn fa_appeal(salary: u32, years: u8, market: f64, star: f64, team_strength: f64, league_avg: f64, taste: f64, loyalty: f64) -> f64 {
         let ratio = (salary as f64 / market).min(1.6);
         // Money matters much less to stars — they chase winning, not the last dollar.
         let money_appeal = ratio * (1.0 - 0.40 * star);
         let str_norm = (team_strength - league_avg) / 20.0; // ~±0.5
         let contention = str_norm * (0.4 + 1.35 * star);
         let years_appeal = (years as f64 - 2.0) * 0.03;
-        money_appeal + contention + years_appeal + taste
+        money_appeal + contention + years_appeal + taste + loyalty
+    }
+
+    /// The re-signing pull for a player toward a specific team. Zero unless
+    /// `team` is the club he just played for; then his morale there decides it —
+    /// a happy player (morale > 0.5) leans toward staying, an unhappy one leans
+    /// toward leaving. Range is roughly -0.25 .. +0.25.
+    pub(crate) fn resign_loyalty(&self, pid: PlayerId, team: TeamId) -> f64 {
+        let Some(p) = self.players.iter().find(|p| p.id == pid) else { return 0.0 };
+        if p.prev_team != Some(team) {
+            return 0.0;
+        }
+        (p.morale - 0.5) * 0.5
     }
 
     /// Open the offseason free-agency period. The pool is every unsigned player
@@ -3129,7 +3149,9 @@ impl League {
                 }
                 // Per-(player,team) taste; stars have a wider, noisier market.
                 let taste = rng.gen_range(0.0..(0.15 + 0.5 * star)) + fa_bonus.get(&o.team).copied().unwrap_or(0.0);
-                let u = Self::fa_appeal(o.salary, o.years, market, star, strength[&o.team], league_avg, taste);
+                // Loyalty pull toward his old club (morale-based); 0 elsewhere.
+                let loyalty = self.resign_loyalty(pid, o.team);
+                let u = Self::fa_appeal(o.salary, o.years, market, star, strength[&o.team], league_avg, taste, loyalty);
                 if u > best_u {
                     best_u = u;
                     best = Some(o.clone());

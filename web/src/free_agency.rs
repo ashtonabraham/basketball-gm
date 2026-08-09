@@ -168,8 +168,10 @@ fn FaPool() -> impl IntoView {
                 engine::Interest::Eager => 4, engine::Interest::Interested => 3,
                 engine::Interest::Lukewarm => 2, engine::Interest::Unlikely => 1, engine::Interest::NoOffer => 0,
             };
+            // Is this one of the user's own expiring players? (loyalty applies)
+            let mine = user.is_some() && p.prev_team == user;
             Some((p.id, p.name.clone(), p.position.abbrev(), p.age, p.overall(), p.potential,
-                  engine::market_salary(p.overall()), offer, interest.label(), irank))
+                  engine::market_salary(p.overall()), offer, interest.label(), irank, mine))
         }).collect();
         let (key, asc) = sort.get();
         v.sort_by(|a, b| {
@@ -213,13 +215,16 @@ fn FaPool() -> impl IntoView {
                     {th("Interest", Sort::Interest, false)}
                 </tr></thead>
                 <tbody>
-                    {move || pool().into_iter().map(move |(id, name, pos, age, ovr, pot, ask, offer, interest, irank)| {
+                    {move || pool().into_iter().map(move |(id, name, pos, age, ovr, pot, ask, offer, interest, irank, mine)| {
                         let is_sel = move || sel.0.get() == Some(id);
                         let icls = match irank { 4 | 3 => "int good", 2 => "int mid", 1 => "int bad", _ => "int" };
                         view! {
                             <tr class=move || if is_sel() { "row pickable sel" } else { "row pickable" }
                                 on:click=move |_| sel.0.set(Some(id))>
-                                <td class="left"><crate::ui::PlayerLink id=id name=name/></td>
+                                <td class="left">
+                                    <crate::ui::PlayerLink id=id name=name/>
+                                    {mine.then(|| view! { <span class="mine-tag" title="Your player — his morale affects re-signing">"\u{21a9} yours"</span> })}
+                                </td>
                                 <td>{pos}</td>
                                 <td>{age}</td>
                                 <td><span class="ovr">{ovr}</span></td>

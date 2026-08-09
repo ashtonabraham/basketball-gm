@@ -690,3 +690,7 @@ body {
 .fin-slider-row { display: flex; align-items: center; gap: .7rem; }
 .fin-slider-row .fin-range { flex: 1; margin-top: 0; }
 .fin-slider-row .fin-num { width: 72px; flex: 0 0 auto; }
+
+.mine-tag { display: inline-block; margin-left: .4rem; font-size: .64rem; font-weight: 800;
+  color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 999px; padding: .05rem .35rem; vertical-align: middle; }

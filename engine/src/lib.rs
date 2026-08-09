@@ -134,6 +134,32 @@ mod integration_tests {
     }
 
     #[test]
+    fn morale_drives_resign_loyalty() {
+        let mut league = League::new(1);
+        league.select_team(0);
+        let pid = league.teams[0].roster[0];
+
+        // Pretend his contract just expired off the user's team (id 0).
+        {
+            let p = league.players.iter_mut().find(|p| p.id == pid).unwrap();
+            p.prev_team = Some(0);
+            p.morale = 0.9; // very happy
+        }
+        let happy = league.resign_loyalty(pid, 0);
+
+        league.players.iter_mut().find(|p| p.id == pid).unwrap().morale = 0.1; // unhappy
+        let unhappy = league.resign_loyalty(pid, 0);
+
+        // A happy player leans toward re-signing; an unhappy one leans away.
+        assert!(happy > 0.0, "happy player should have positive re-sign pull");
+        assert!(unhappy < 0.0, "unhappy player should have negative re-sign pull");
+        assert!(happy > unhappy);
+
+        // No pull toward a team he never played for.
+        assert_eq!(league.resign_loyalty(pid, 1), 0.0);
+    }
+
+    #[test]
     fn arrest_suspension_benches_a_player() {
         let mut league = League::new(4);
         league.select_team(0);
