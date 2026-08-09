@@ -97,6 +97,12 @@ fn main() {
         check_invariants(&l, &format!("yr {yr} newseason"));
     }
 
+    // Morale health check: locker-room decay shouldn't crater the whole league.
+    let rostered: Vec<f64> = l.players.iter().filter(|p| p.team.is_some()).map(|p| p.morale).collect();
+    let avg_morale = rostered.iter().sum::<f64>() / rostered.len() as f64;
+    let malcontents = rostered.iter().filter(|m| **m < 0.30).count();
+    println!("League morale: avg {:.2}, {} players want a trade of {} rostered.", avg_morale, malcontents, rostered.len());
+
     let avg_rank = strength_ranks.iter().sum::<usize>() as f64 / strength_ranks.len() as f64;
     println!("Completed {seasons} full seasons with no invariant violations.");
     println!("User team avg strength rank: {avg_rank:.1} of 32 (lower = better).");

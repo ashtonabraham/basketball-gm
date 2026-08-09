@@ -766,6 +766,43 @@ impl League {
                 p.suspended -= 1;
             }
         }
+
+        // A disgruntled player the GM leaves to stew drags himself — and the
+        // locker room — down over the season. Scoped to the user's team: CPU
+        // clubs are assumed to manage their own rooms (their morale only moves
+        // in the offseason), so this reflects the player's own choices.
+        if let Some(uid) = self.user_team_id {
+            if played_teams.contains(&uid) {
+                self.tick_locker_room(uid);
+            }
+        }
+    }
+
+    /// One game's worth of locker-room morale drift for a team: any player who
+    /// wants a trade (morale below the request threshold) sinks a little
+    /// further, and each malcontent sours his teammates a touch. Applied per
+    /// game, so an unaddressed problem compounds across the season.
+    fn tick_locker_room(&mut self, tid: TeamId) {
+        const REQUEST: f64 = 0.30; // matches `trade_requests`
+        const SELF_DECAY: f64 = 0.0025; // a malcontent's own slide, per game
+        const RIPPLE: f64 = 0.0012; // per malcontent, onto each teammate, per game
+
+        // Count how many on this team currently want out.
+        let malcontents = self
+            .players
+            .iter()
+            .filter(|p| p.team == Some(tid) && p.morale < REQUEST)
+            .count();
+        if malcontents == 0 {
+            return;
+        }
+        // A packed doghouse hurts more, but cap the contagion so a team can't
+        // spiral to zero in a single season.
+        let ripple = RIPPLE * (malcontents.min(3) as f64);
+        for p in self.players.iter_mut().filter(|p| p.team == Some(tid)) {
+            let drop = if p.morale < REQUEST { SELF_DECAY + ripple } else { ripple };
+            p.morale = (p.morale - drop).max(0.05);
+        }
     }
 
     /// Simulate the next day of games. Returns the day simmed, or `None` if the

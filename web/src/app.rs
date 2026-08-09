@@ -10,7 +10,7 @@ use engine::{League, Phase};
 use leptos::prelude::*;
 
 /// Build version, shown in the corner so you can tell the deployed build apart.
-pub const VERSION: &str = "v0.9.1";
+pub const VERSION: &str = "v0.9.2";
 
 /// A seed for new leagues, derived from the page-load timestamp.
 pub fn time_seed() -> u64 {

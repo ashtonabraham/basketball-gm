@@ -525,7 +525,7 @@ fn RosterPanel() -> impl IntoView {
                     {move || requests().into_iter().map(|(id, label)| view! {
                         <crate::ui::PlayerLink id=id name=label/>
                     }).collect_view()}
-                    <span class="dim">" \u{2014} unhappy players want out. Move them or turn the season around."</span>
+                    <span class="dim">" \u{2014} left unhappy, they sink further and drag the locker room down each game. Move them or turn the season around."</span>
                 </div>
             </Show>
             <table class="tbl">
